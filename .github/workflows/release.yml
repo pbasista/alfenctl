@@ -1,0 +1,67 @@
+# Publishing, on a version tag.  `git tag v0.2.0 && git push --tags` is the
+# whole procedure; the tag has to match the version in
+# src/alfenctl/__init__.py, which is the one place it is written down.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  # The tag push does not itself trigger CI (its trigger is branches), so the
+  # checks run here.  Nothing below starts until they are green.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: The tag and the package must agree
+        run: |
+          version=$(uv run --no-project python -c \
+            "import re,pathlib;print(re.search(r'\"(.+)\"',[l for l in pathlib.Path('src/alfenctl/__init__.py').read_text().splitlines() if l.startswith('__version__')][0]).group(1))")
+          if [ "v$version" != "${GITHUB_REF_NAME}" ]; then
+            echo "tag ${GITHUB_REF_NAME} but __version__ is $version" >&2
+            exit 1
+          fi
+      - run: uv build
+      # A wheel that does not start is not worth publishing.
+      - run: uv run --no-project --with dist/*.whl alfenctl --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # PyPI trusted publishing: no API token to keep anywhere
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

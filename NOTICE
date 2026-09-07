@@ -1,0 +1,27 @@
+NOTICE
+======
+
+This project is licensed under the European Union Public Licence v1.2
+(EUPL-1.2) -- see LICENSE. Three files shipped in this distribution are
+not covered by that license and remain under their own terms:
+
+* ``src/alfenctl/EDS.xml`` -- the charger property catalog, taken
+  verbatim from Alfen's ACE Service Installer. Copyright Alfen B.V.
+  Included unmodified for interoperability with Alfen charging stations;
+  no license to redistribute it is granted by this project beyond what
+  its copyright holder allows.
+
+* ``src/alfenctl/logo_blobs.bin`` -- the seven fixed display assets a
+  firmware-update package must carry, extracted from byte arrays in
+  Alfen's ACEFWUCreator.dll. Copyright Alfen B.V. Included for
+  interoperability; same terms as above.
+
+  How both files were obtained, and how to verify them against a new
+  release of the installer, is recorded in ``tools/extract_assets.py``.
+
+* ``src/alfenctl/web/static/vendor/preact-htm.module.js`` -- Preact and
+  htm, bundled as one ES module. Copyright Jason Miller and contributors,
+  MIT License; the full notice is embedded as a comment at the top of the
+  file. Upstream: https://preactjs.com/ and https://github.com/developit/htm
+
+Everything else in this distribution is licensed under the EUPL-1.2.

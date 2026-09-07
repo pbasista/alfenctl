@@ -1,0 +1,124 @@
+[project]
+name = "alfenctl"
+dynamic = ["version"]
+description = "Discover Alfen EV charging stations, inspect and change their properties, upgrade firmware, and upload splash-screen logos."
+readme = "README.md"
+license = "EUPL-1.2"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Peter Bašista", email = "pbasista@gmail.com" }]
+requires-python = ">=3.10"
+dependencies = [
+    "cryptography>=50.0.1",
+    "httpx>=0.27",
+    "pillow>=12.3.0",
+    "tomli>=2; python_version < '3.11'",
+    "zeroconf>=0.132",
+]
+keywords = [
+    "alfen",
+    "evse",
+    "charger",
+    "charging-station",
+    "firmware",
+    "upgrade",
+    "logo",
+    "configuration",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: System :: Hardware",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/pbasista/alfenctl"
+Repository = "https://github.com/pbasista/alfenctl"
+Issues = "https://github.com/pbasista/alfenctl/issues"
+
+[project.scripts]
+alfenctl = "alfenctl.cli:main"
+
+[dependency-groups]
+dev = [
+    "mini-racer>=0.12",
+    "pytest>=8.4",
+    "ruff>=0.12",
+    # Not for the tests: ty is configured for 3.10 below, so it always reads
+    # the `import tomli` branch of config.py whatever interpreter it is run
+    # on.  Without this the module is missing on 3.11+ and present on 3.10,
+    # and no one state of a suppression comment suits both.  The runtime
+    # dependency keeps its `python_version < '3.11'` marker; this only puts
+    # the module in front of the type checker.
+    "tomli>=2",
+    "ty>=0.0.1a21",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/alfenctl/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/alfenctl"]
+
+# research/ holds the material this tool was reimplemented from -- vendor
+# installers, the Android APK and its decompiled dumps, firmware images.
+# Only the guides and findings tables are tracked, but hatchling reads the
+# root .gitignore and not research/.gitignore, so a build in a working
+# directory that has the rest would pack all of it (a ~116 MB sdist, most
+# of it Alfen's to distribute, not ours).  Name it here instead.
+[tool.hatch.build.targets.sdist]
+exclude = ["/research"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint]
+# Pydocstyle (D, PEP 257) keeps docstrings honest; PLR2004 flags magic numbers,
+# so protocol values end up in named constants.
+select = ["E", "F", "W", "D", "PLR2004"]
+# The formatter keeps code within 88 columns, but we do not enforce E501 on
+# comments/docstrings/strings (the formatter never breaks those, and a few --
+# like the byte-exact multipart header -- must stay verbatim).
+ignore = ["E501"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
+
+[tool.ruff.lint.per-file-ignores]
+# Tests need no docstrings and naturally use literal fixture values.
+"tests/**" = ["D", "PLR2004"]
+
+# ty (Astral's type checker) runs over the package only.  The tests are
+# full of deliberately partial fakes -- a FakeCharger implements the six
+# methods the command under test calls and nothing else -- and typing those
+# to a checker's satisfaction would obscure what each one is standing in for.
+[tool.ty.environment]
+python-version = "3.10"
+
+[tool.ty.src]
+include = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    # the engine's ctypes structs predate Python 3.14's _layout_ warnings
+    "ignore:Due to '_pack_':DeprecationWarning:py_mini_racer",
+]

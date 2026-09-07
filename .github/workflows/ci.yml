@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  # A pull request from a branch of this repository was already checked by
+  # the push above; listening to both would run every one of them twice.
+  # A fork's branch produces no push event here, so the `if` on each job
+  # below lets those -- and only those -- through.
+  pull_request:
+  # release.yml calls this workflow before it builds, so a tag cannot
+  # publish what the checks have not passed.
+  workflow_call:
+
+permissions:
+  contents: read
+
+# A newer commit on the same branch makes the older run's answer moot.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      # --locked: a uv.lock that no longer matches pyproject.toml is a
+      # mistake to report, not one to paper over with a fresh resolution.
+      - run: uv sync --locked
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+      - run: uv run ty check
+      - run: uv run python tools/htmcheck.py
+      - run: uv run pytest
+
+  # Biome is one native binary and needs no Node; it lints the browser half
+  # once, not once per Python version.  `tools/frontlint.py` runs above, in
+  # the test job, and checks what Biome cannot: the wiring between modules.
+  frontend:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: biomejs/setup-biome@v2
+        with:
+          version: 2.5.12
+      - run: biome ci

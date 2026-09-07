@@ -1,0 +1,1536 @@
+/* alfenctl web UI -- dark first, on true black.
+ *
+ * The canvas is #000 so a station checked at night in a dark garage does not
+ * light up the room; panels are lifted just enough to read as panels, and
+ * what glows is text and small accents, never a large field.
+ *
+ * "Just enough" was not enough.  The first cut put the panels 1.07:1 above
+ * the canvas with a 1.3:1 border, which is a card you can find only by
+ * knowing where it is -- fine on the bright screen it was drawn on, and a
+ * page of floating text on anything dimmer.  A panel is now 1.24:1 above
+ * the canvas and its border 2.3:1, so the edge does the separating and the
+ * fill stays dark; --line-strong, which is what a control's own outline is
+ * drawn in, clears 3:1 against the panel behind it.
+ *
+ * Colour has jobs, not decoration:
+ *   blue   -- the primary: identity, links, focus, a healthy idle link
+ *   amber  -- electricity and activity: live values, a busy connection
+ *   green  -- settled and well: available, succeeded
+ *   rose   -- used sparingly, and only where something is destructive
+ */
+
+:root {
+  --bg: #000000;
+  --surface: #161d28;
+  --surface-2: #1f2836;
+  --surface-3: #2a3648;
+  --line: #3c4a61;
+  --line-strong: #55688a;
+
+  /* Three tiers, and all three are meant to be read: --text-dim carries the
+   * field labels, so it stays above 7:1 on a panel, and even --text-faint --
+   * the least of them -- clears 6:1.  The first cut of this had labels at
+   * 3.8:1, which is fine in a bright room and unreadable in a dark one. */
+  --text: #e9eef6;
+  --text-dim: #b6c2d4;
+  --text-faint: #98a6bc;
+
+  --blue: #3d9be0;
+  --blue-bright: #74c0f4;
+  --blue-deep: #123249;
+  --amber: #eba83f;
+  --amber-deep: #40300f;
+  --green: #2fc39f;
+  --green-deep: #0e3b32;
+  --rose: #e0727b;
+  --rose-deep: #45191d;
+
+  --radius: 10px;
+  --radius-sm: 6px;
+  --gap: 16px;
+
+  /* The width of a field's name, everywhere.  One number rather than one
+   * per card is what makes the values line up down the page instead of
+   * stepping in and out with whatever the longest label in each card
+   * happened to be. */
+  --label-col: 9.5rem;
+
+
+
+  /* The type scale: two steps below the 15px body and one above it.  What
+   * used to be a dozen ad-hoc decimal sizes -- several of them small enough
+   * to squint at -- is on these three now. */
+  --fs-xs: 12px;
+  --fs-sm: 13.5px;
+  --fs-lg: 17px;
+
+  /* The content column, and the gutter that shrinks with the window.  Wide
+   * enough that a 1440p display is not mostly margin, capped so a line of
+   * text on an ultrawide is still a line and not a horizon. */
+  --page: 1600px;
+  --gutter: clamp(14px, 2.4vw, 40px);
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+
+  /* What the browser draws its own widgets in: a checkbox's tick, a number
+   * input's spinners, a select's arrow and popup, a scrollbar.
+   *
+   * The page's theme is a choice this page makes -- from the system unless
+   * the browser has been told otherwise -- and `<meta name="color-scheme">`
+   * cannot know about it: it names the schemes the page supports and lets
+   * the *machine's* preference pick one.  A laptop set to dark whose reader
+   * had switched this page to light therefore got a light page with black
+   * checkboxes and black spinner arrows on it.  Declaring the scheme here,
+   * beside the palette it belongs to, is what keeps the two halves of the
+   * page -- the one this stylesheet paints and the one the browser does --
+   * agreeing about which theme is on. */
+  color-scheme: dark;
+
+  /* What lifts a slider's thumb off the track.  A light theme gets this
+   * from the browser's own widget shadow and needs nothing added; on near
+   * black a black shadow is invisible, so the lift there is a faint light
+   * rim, which is the same cue read the only way a dark page can read it. */
+  --slider-lift: drop-shadow(0 1px 2px rgb(0 0 0 / 70%))
+    drop-shadow(0 0 1px rgb(233 238 246 / 45%));
+
+  /* The two ends of a progress bar's fill.  The palette's own blue and
+   * amber are chosen to be read as *text* on a light page, which makes
+   * them far too dark as a large filled area: a bar in the light theme
+   * came out nearly black-blue.  These are the same two hues, lightened
+   * to the weight a filled bar wants. */
+  --bar-from: var(--blue);
+  --bar-to: var(--amber);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --slider-lift: none;
+  --bar-from: #4ba3dd;
+  --bar-to: #e8a83c;
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --surface-2: #f1f3f6;
+  --surface-3: #e7eaef;
+  --line: #dde1e8;
+  --line-strong: #c3cad6;
+  --text: #131820;
+  --text-dim: #414b59;
+  --text-faint: #5b6675;
+  --blue: #1c6fa8;
+  --blue-bright: #145183;
+  --blue-deep: #dceaf6;
+  --amber: #9a6b10;
+  --amber-deep: #faedd4;
+  --green: #0f7a63;
+  --green-deep: #d9f2eb;
+  --rose: #b23641;
+  --rose-deep: #fadfe1;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+button, input, select, textarea { font: inherit; color: inherit; }
+
+/* Every number that changes under you keeps its columns still. */
+.value, table td, .metric-value, .pill-op { font-variant-numeric: tabular-nums; }
+
+a { color: var(--blue); }
+
+/* --- shell ------------------------------------------------------------- */
+
+/* A column: the header, whatever is warning you, and the page.
+ *
+ * This was `grid-template-rows: auto 1fr`, which was right for exactly two
+ * children and wrong the moment the offline banner became a third -- the
+ * banner would have taken the `1fr` and the page the leftover `auto`, so
+ * the one row that says the server has gone would have been the tallest
+ * thing on the screen. */
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+.app > .body { flex: 1 1 auto; }
+
+
+header.top {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+  padding: 11px var(--gutter);
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line);
+}
+
+/* Two links in one wordmark: the name goes to the repository, the
+ * version number to its releases.  The container is the flex box the
+ * single link used to be, so the header layout does not change. */
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.brand a {
+  text-decoration: none;
+  color: inherit;
+  font-weight: 620;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+}
+/* The bolt is the mark, so it carries the colour the page uses for
+ * electricity; the word beside it is text until you point at it.  It wore
+ * this class and no rule, which is what C003 in tools/frontlint.py now
+ * refuses to let happen again. */
+.brand .bolt { color: var(--amber); }
+.brand .home:hover .name { color: var(--amber); }
+
+/* The version reads as an annotation on the name, not a link of equal
+ * standing, so it is faint and lighter -- but it still answers the
+ * pointer, and says where it goes. */
+.brand .ver {
+  color: var(--text-faint);
+  font-weight: 500;
+}
+.brand .ver:hover { color: var(--amber); }
+
+.station-id { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
+.station-id .primary { font-weight: 560; }
+.station-id .secondary { color: var(--text-dim); font-size: var(--fs-sm); }
+
+.spacer { flex: 1 1 auto; }
+
+nav.tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 var(--gutter);
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+nav.tabs::-webkit-scrollbar { display: none; }
+nav.tabs button {
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  padding: 10px 16px;
+  cursor: pointer;
+  border-radius: 0;
+  white-space: nowrap;
+}
+/* A tab you are not on has to look like a tab.  Colour alone was the only
+ * thing that moved on hover, which on a strip of nine words reads as text
+ * that happens to brighten rather than as somewhere you can go -- so the
+ * underline the selected tab wears appears in a quieter grey under the one
+ * the pointer is on, and the label lifts off the canvas. */
+nav.tabs button:hover {
+  color: var(--text);
+  border-bottom-color: var(--line-strong);
+  background: color-mix(in srgb, var(--surface) 65%, transparent);
+}
+nav.tabs button[aria-selected="true"] { color: var(--blue-bright); border-bottom-color: var(--blue); }
+nav.tabs button[aria-selected="true"]:hover { border-bottom-color: var(--blue); }
+
+/* Nine tabs do not fit a phone, and a strip that is cut off dead at the
+ * edge does not look scrollable.  A fade at each end says there is more. */
+nav.tabs {
+  mask-image: linear-gradient(90deg, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
+}
+
+/* A tab that has been opened and is not the one being looked at.  It keeps
+ * everything -- what it read, what is half-typed in it, where it was
+ * scrolled to -- and comes back instantly. */
+.pane[hidden] { display: none; }
+
+
+main {
+  padding: 24px var(--gutter) 40px;
+  max-width: var(--page);
+  width: 100%;
+  margin: 0 auto;
+}
+
+/* The licence line: below all content, quiet, one line.  The EU flag next
+ * to it is the cue for what "EUPL" means even if the acronym says nothing
+ * to you.  The flag itself is an inline SVG in the official geometry; what
+ * the stylesheet adds is the presentation. */
+.license {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 var(--gutter) 28px;
+  font-size: var(--fs-sm);
+  color: var(--text-faint);
+}
+.license a { color: var(--text-faint); }
+.license a:hover { color: var(--blue-bright); }
+.license svg { flex: none; display: block; }
+
+/* The flag is a dark blue rectangle, and this page paints its canvas
+ * either near-black or near-white -- on both, a flat dark rectangle at
+ * 30x20 sinks into the page.  A hairline in the panel-line grey was not
+ * enough to pick it out of the black, so the dark theme frames it in the
+ * faint text grey instead: a light steel edge that reads as a sticker,
+ * not a sunk rectangle.  The drop shadow gives it a lift in both
+ * themes. */
+.eu-flag {
+  border: 1px solid var(--text-faint);
+  border-radius: 3px;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.4));
+}
+
+/* Light theme: the flag's blue is dark enough to hold its own edge
+ * against the light-grey page, so drop the border; the drop shadow
+ * stays as the cue. */
+[data-theme="light"] .eu-flag { border: 0; }
+
+/* --- the link indicator ------------------------------------------------ */
+
+/* Wide enough for the longest thing it says, so that saying a different
+ * one moves nothing.
+ *
+ * The label runs from "busy" to "connected, idle" to "server
+ * unreachable", and the pill was as wide as whatever it held: every
+ * change of state resized it, and since the header packs these against
+ * its right edge, everything to the left of the pill slid along with it.
+ * A minimum the longest label fits means the pill only grows for the
+ * operation text, which is the part that is genuinely news. */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 11px 5px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  font-size: var(--fs-sm);
+  min-width: 24ch;
+  max-width: 46ch;
+}
+.pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); flex: none; }
+/* The label is the state's name and never abbreviates; what gives when the
+ * pill runs out of room is the operation text beside it. */
+.pill .label { color: var(--text-dim); flex: none; }
+.pill-op { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.pill.released { border-color: var(--line); }
+.pill.idle    { border-color: var(--blue-deep); }
+.pill.idle .dot { background: var(--blue); }
+.pill.connecting { border-color: var(--amber-deep); }
+.pill.connecting .dot, .pill.busy .dot { background: var(--amber); animation: throb 1.1s ease-in-out infinite; }
+.pill.busy { border-color: var(--amber-deep); background: color-mix(in srgb, var(--amber-deep) 30%, var(--surface)); }
+.pill.busy .label, .pill.connecting .label { color: var(--amber); }
+/* The live refresh is the link being busy, and the pill says so -- but not
+ * in the colours of an alarm.  Something that lights up every three seconds
+ * whether or not anything is wrong is a light nobody reads twice. */
+.pill.busy.quiet { border-color: var(--blue-deep); background: var(--surface); }
+.pill.busy.quiet .label { color: var(--text-dim); }
+.pill.busy.quiet .dot { background: var(--blue); animation: none; }
+.pill.error { border-color: var(--rose-deep); background: color-mix(in srgb, var(--rose-deep) 30%, var(--surface)); }
+.pill.error .dot { background: var(--rose); }
+.pill.error .label { color: var(--rose); }
+
+@keyframes throb {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.82); }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Same specificity as the rule that starts it, and later in the
+   * file, so the animation is cancelled without !important. */
+  .pill.connecting .dot, .pill.busy .dot { animation: none; }
+}
+
+.pill .queued {
+  font-size: var(--fs-xs);
+  color: var(--amber);
+  border-left: 1px solid var(--line-strong);
+  padding-left: 8px;
+}
+
+/* The connection, as one control in the header.
+ *
+ * The pill is a button now, and everything the bar under the tabs used to
+ * hold -- the live toggle, connect, release, who else is watching, and
+ * what the link has been doing -- is in the menu it opens.  That is a
+ * whole row of chrome returned to the page, and the history in here is
+ * free to be as tall as it likes because it is over the page rather than
+ * in it. */
+.conn { position: relative; display: flex; }
+.conn > .pill { cursor: pointer; text-align: left; }
+.conn > .pill .caret { color: var(--text-faint); font-size: var(--fs-xs); flex: none; }
+.conn.open > .pill, .conn > .pill:hover { border-color: var(--line-strong); background: var(--surface-2); }
+/* What the switch beside the pill is set to.  A statement, not a control:
+ * two places to flip one boolean is two places for it to drift. */
+.conn-live { font-size: var(--fs-sm); }
+/* The server itself is gone, so the pill is not describing a charger at
+ * all.  Reddened, and that is all: it was struck through as well, on the
+ * reasoning that this is the page saying it cannot see rather than an
+ * alarm about the station -- but a line through five small words is a line
+ * through the one message on the page that has to be read at a glance.
+ * The colour already says it. */
+.pill.gone { border-color: var(--rose-deep); }
+.pill.gone .dot { background: var(--rose); }
+.pill.gone .label { color: var(--rose); }
+
+.conn-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 8px);
+  right: 0;
+  display: grid;
+  gap: 12px;
+  width: min(430px, calc(100vw - 2 * var(--gutter)));
+  padding: 13px 15px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  box-shadow: 0 12px 30px rgb(0 0 0 / 45%);
+}
+.conn-head { display: flex; align-items: baseline; gap: 10px; font-size: var(--fs-sm); }
+.conn-head .what { font-weight: 560; }
+.conn-head .muted { margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conn-past { border-top: 1px solid var(--line); padding-top: 10px; font-size: var(--fs-sm); }
+.conn-past .row { display: flex; align-items: baseline; gap: 10px; color: var(--text-faint); }
+.conn-past .row .op {
+  color: var(--text-dim);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.conn-past .row.bad .op { color: var(--rose); }
+.conn-past .row .ms, .conn-past .row .when { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.conn-past .row .when { color: var(--text-faint); }
+.past-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 9px;
+  color: var(--text-dim);
+}
+.past-head .muted { margin-left: auto; font-size: var(--fs-xs); }
+.past-list { display: grid; gap: 5px; max-height: min(42vh, 340px); overflow: auto; }
+
+/* The program behind the page has gone.
+ *
+ * This was a bar of its own between the header and the tabs, which meant
+ * every blip of the server moved the whole page down and back.  It rides
+ * in the header's slack instead: `min-width: 0` and an ellipsis so it
+ * gives the space back rather than pushing the pill along, and no height
+ * of its own -- the header is already taller than one line of this text.
+ * See `OfflineNotice` in js/ui.js for why the sentence is hidden from
+ * the reader here and repeated in `.sr-only`. */
+.offline-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  color: var(--amber);
+}
+.offline-note.gone { color: var(--rose); }
+.offline-note .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+.offline-note .what {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+/* The one edge the page already draws, tinted, rather than a new one:
+ * a colour change on an existing hairline reflows nothing. */
+header.top.lost { border-bottom-color: var(--amber-deep); }
+header.top.gone { border-bottom-color: var(--rose-deep); }
+
+/* Said to a screen reader and to nothing else.  Not `display: none`,
+ * which is not read at all. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* A read that is taking long enough to be worth a bar.  Sits between a
+ * panel's toolbar and its content, so the thing you are waiting for is
+ * where the answer will appear. */
+.reading { margin-bottom: 14px; }
+.reading .what {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.reading .what .muted { margin-left: auto; font-variant-numeric: tabular-nums; }
+/* Nothing knows how many pages a charger's log has, so a bar that claimed
+ * a percentage would be making one up.  It sweeps instead: motion says
+ * "still going", which is the whole question being asked. */
+.reading .bar.unknown > span { width: 35%; animation: sweep 1.4s ease-in-out infinite; }
+@keyframes sweep {
+  0% { margin-left: 0; }
+  50% { margin-left: 65%; }
+  100% { margin-left: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .reading .bar.unknown > span { animation: none; width: 100%; opacity: 0.55; }
+}
+
+
+/* --- generic surfaces --------------------------------------------------- */
+
+/* One card is one column, always.  auto-fill (not auto-fit) keeps the track
+ * width fixed by the window rather than by how many cards happen to exist,
+ * so every panel on the page is the same width and a page with five of them
+ * looks like a page with eight.
+ *
+ * The cards used to keep their own heights, which meant a row of them ended
+ * on three different lines and the page read as a pile rather than a grid.
+ * They stretch to their row now, and the card is a column so that what sits
+ * at the bottom of one -- the Apply row, the caveats -- sits at the bottom
+ * of all of them rather than wherever its own content happened to stop. */
+.grid {
+  display: grid;
+  gap: var(--gap);
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  align-items: stretch;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+}
+/* Every card on the page renders this heading through the one shared
+ * `Card`, so its layout lives here rather than as an inline style the
+ * class checks below cannot see: the title, then a spacer, then whatever
+ * the card hangs on the right of it. */
+.card h2 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 14px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+/* A button that is a card's own child -- "Restart the charger", "Sync the
+ * clock" -- is as wide as its label, not as wide as the card.  It used to be
+ * that by being inline in a block; now that the card is a flex column it has
+ * to be told, or a stretched item is what it becomes. */
+.card > button.btn { align-self: flex-start; }
+/* Two exceptions to a card per column, and they are the only two.  `wide`
+ * is content that wants more than one track but not the row -- a list of
+ * releases, a four-column table of tags; `full` is content that is
+ * genuinely a row wide.  Anything else stays one column, which is what
+ * keeps the page a grid.
+ *
+ * `full` had drifted onto nine cards, only two of which held anything a
+ * row wide, and a full-width card *ends* its row -- so every card after a
+ * short one spanning 1600px started a new line, which is what made the
+ * tabs read as a stack rather than a grid.  Two of the widest were forms
+ * rather than content and are now several cards each (see `useBalancing`
+ * in js/charging.js and `useOcpp` in js/backoffice.js), and two follow
+ * what they are holding at the time: the console is a row wide only while
+ * its command table is open.
+ *
+ * What is *not* here is `grid-auto-flow: dense`.  It would let a later
+ * one-column card backfill the gap a wide one leaves at the end of a row,
+ * and it would do it by decoupling visual order from DOM order -- on a
+ * page whose tab strip is a real `role="tablist"` with a roving
+ * tabIndex.  Keyboard order disagreeing with reading order is a worse
+ * fault than a gap.  Cards that really are a row wide go last within
+ * their tab instead, so the row they end is the last one. */
+.card.wide { grid-column: span 2; }
+.card.full { grid-column: 1 / -1; }
+
+
+/* Every row in a card shares one two-column grid, so all the values in a
+ * card start at the same place.  The width of that column is now the same
+ * number in every card: `fit-content(42%)` made it a function of the
+ * longest label the card happened to hold, so "Mode" and "Clock
+ * difference" put their values in different places, and a page of cards
+ * had as many value columns as it had cards.  A fixed column is one
+ * column, down the whole page.
+ *
+ * The rows themselves are display:contents so they take part in the
+ * card's grid rather than making a grid each. */
+/* The label sits against the middle of its value, not against its first
+ * baseline.  Baseline alignment is right for two pieces of text and wrong
+ * for everything else a value can be: a `<select>`, a range slider and a
+ * checkbox each put their baseline somewhere different -- the bottom of the
+ * box, the middle of the thumb -- so a card of mixed rows had the labels at
+ * four heights and none of them level with the control they name.  Centred,
+ * every label is level with its value whatever the value is made of. */
+.rows {
+  display: grid;
+  grid-template-columns: minmax(0, var(--label-col)) minmax(0, 1fr);
+  gap: 9px 16px;
+  align-items: center;
+}
+
+/* A row that is not in a row list is a two-column grid of its own.
+ *
+ * `.row2` was only ever `display: contents`, which is how a pair dissolves
+ * into the list's shared grid -- and does nothing whatever when there is no
+ * list around it.  Put straight into a card, which is a flex *column*, the
+ * label and the value became two stacked items: the name on one line and
+ * the value right-aligned on the next.  Three whole tabs were built that
+ * way (charging, access, backoffice) while the dashboard wrapped its rows
+ * and got two columns, which is why the same kind of field looked like two
+ * different things depending on which tab you were on.
+ *
+ * The columns are identical either way, because the label column is a
+ * fixed width rather than one derived from the content -- so a row aligns
+ * with the rows above it whether they share one grid or have one each, and
+ * a card can no longer be laid out wrongly by forgetting a wrapper. */
+.row2 {
+  display: grid;
+  grid-template-columns: minmax(0, var(--label-col)) minmax(0, 1fr);
+  gap: 9px 16px;
+  align-items: center;
+}
+.row2 + .row2 { margin-top: 9px; }
+.rows .row2 { display: contents; margin-top: 0; }
+/* A row list is a two-column grid whose pairs dissolve into it, so anything
+ * else put directly in one is a grid item and auto-placement drops it in
+ * whichever single column happened to be free -- usually the label column,
+ * which is 9.5rem wide and wraps a price list to death.  Give such a block
+ * the whole width; a group of rows belongs flat among the rows anyway. */
+.rows > :not(.row2) { grid-column: 1 / -1; }
+.row2 .k { color: var(--text-dim); font-size: var(--fs-sm); }
+/* Values end at the card's right edge rather than starting at the label's.
+ * Left-aligned they left a different width of nothing after every one, so a
+ * card of six readings had six ragged ends; against the edge they line up
+ * with each other, with the values in the card below, and -- the cards
+ * being one width -- across the page. */
+.row2 .v {
+  color: var(--text);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+/* A value that is itself a row of things -- a slider and its reading, a
+ * checkbox and its label -- has to be pushed rather than aligned. */
+.row2 .v > .set, .row2 .v > .toggle, .row2 .v > .chips { justify-content: flex-end; }
+/* Identifiers, keys and timestamps read character by character, so they get
+ * fixed-width digits.  They wrap like anything else: a value that runs off
+ * its own scrollbar is worse than one that takes two lines. */
+.row2 .v.data { font-family: var(--mono); font-size: var(--fs-sm); }
+.muted { color: var(--text-faint); }
+
+.metric { display: flex; align-items: baseline; gap: 7px; }
+.metric-value { font-size: 34px; font-weight: 300; letter-spacing: -0.02em; color: var(--amber); }
+.metric-unit { color: var(--text-dim); font-size: var(--fs-sm); }
+.metric.calm .metric-value { color: var(--text); }
+
+/* What the charger has been drawing, since this page started watching.
+ *
+ * Amber, because that is this page's colour for something live and in
+ * motion, and the same colour as the big number above it -- the line is
+ * that number's own history, not a second measurement.  The SVG is
+ * stretched to the card's width (`preserveAspectRatio: none`), so the
+ * stroke is pinned by `vector-effect` and every label is HTML outside it. */
+.chart { margin-top: 14px; }
+/* The plot's own rectangle: the SVG, and everything drawn over it.
+ *
+ * The SVG is stretched to the card (`preserveAspectRatio: none`), so
+ * nothing inside it keeps its shape -- a marker circle would come out a
+ * different ellipse in every card.  What has to stay round or stay thin
+ * is HTML positioned in percentages of this box instead, which is the
+ * same rectangle the SVG fills, so a percentage means the same thing to
+ * both of them.  The scale under the plot is outside it. */
+.chart .plot { position: relative; }
+.chart svg {
+  display: block;
+  width: 100%;
+  height: 108px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+/* What the pointer is over.  Not interactive itself -- it follows the
+ * pointer, so anything it caught would be caught from the plot underneath
+ * it, and the reading would flicker as the label chased the cursor. */
+.chart .hover { position: absolute; inset: 0; pointer-events: none; }
+.chart .hover .rule {
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  width: 1px;
+  margin-left: -0.5px;
+  background: var(--line-strong);
+}
+.chart .hover .spot {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  margin: -3.5px 0 0 -3.5px;
+  border-radius: 50%;
+  background: var(--amber);
+  box-shadow: 0 0 0 2px var(--surface-2);
+}
+/* The reading itself, above the plot rather than on it: over the line it
+ * would cover the very shape it is explaining. */
+.chart .hover .tip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  transform: translateX(-50%);
+  display: grid;
+  gap: 1px;
+  padding: 5px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  box-shadow: 0 6px 16px rgb(0 0 0 / 35%);
+  white-space: nowrap;
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.35;
+}
+.chart .hover .tip .when { color: var(--text-faint); }
+.chart .hover .tip .what { color: var(--text); font-weight: 560; }
+.chart .line { fill: none; stroke: var(--amber); stroke-width: 1.75; stroke-linejoin: round; }
+/* One period's energy.  Amber, like the live power above it and for the
+ * same reason: both are electricity, one as it happens and one after the
+ * fact.  A period with no session is a bar of no height rather than a gap
+ * in the axis, so a fortnight away is as wide on the chart as a fortnight
+ * of daily charging.
+ *
+ * `col`, and not `bar`, which is what it was called for a while.  A rect
+ * in an SVG is styled by the same class selectors a div is, and `width`
+ * and `height` are real CSS properties on SVG geometry -- they beat the
+ * attribute written on the element.  So the progress bar's `.bar { height:
+ * 5px }`, four hundred lines further down this file and about a div, set
+ * every bar in this chart to five user units tall: each one drawn as a
+ * short dash floating at the height its top should have reached, and a
+ * period with nothing in it drawn as a dash sitting on the axis.  The page
+ * rendered, and the chart was quietly a scatter plot.  The rule below is
+ * scoped to the two blocks that wanted it, so the next single-word class
+ * does not do this again. */
+.chart .col { fill: color-mix(in srgb, var(--amber) 70%, transparent); }
+.chart .col.under { fill: var(--amber); }
+/* The line the bars stand on.  Without it a short bar in a bordered box
+ * reads as floating; with it, it reads as short. */
+.chart .axis { stroke: var(--line); fill: none; }
+.chart .area { fill: color-mix(in srgb, var(--amber) 16%, transparent); stroke: none; }
+/* Where a setting was written.  Faint, and behind nothing: the question it
+ * answers is "did that do anything", so it has to be next to the line
+ * without competing with it. */
+.chart .mark { stroke: var(--blue); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.75; }
+.chart .ends {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 5px;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+.chart .ends .key { display: inline-flex; align-items: center; gap: 5px; }
+.chart .ends .key i {
+  width: 0;
+  height: 10px;
+  border-left: 1px dashed var(--blue);
+  display: inline-block;
+}
+.chart.empty-chart {
+  color: var(--text-faint);
+  font-size: var(--fs-sm);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  padding: 24px 14px;
+  text-align: center;
+}
+
+.phases { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 12px; }
+
+.phase { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px 10px; background: var(--surface-2); }
+.phase .p { color: var(--text-dim); font-size: var(--fs-xs); letter-spacing: 0.06em; }
+.phase .n { font-size: var(--fs-lg); font-variant-numeric: tabular-nums; }
+/* A phase the station has been told not to use.  Its numbers are real and
+ * they are all zero, which on a tile beside two live ones reads as a fault
+ * -- so the tile is drawn as switched off instead: dashed, dimmed, and
+ * with the word "off" beside the phase's name, because a screen with no
+ * colour to read still has to be able to tell the two apart. */
+.phase.unused {
+  border-style: dashed;
+  background: none;
+  color: var(--text-faint);
+}
+.phase.unused .n, .phase.unused .p { color: var(--text-faint); }
+.phase .off { letter-spacing: 0; }
+
+/* The sockets are one block in the card rather than N children of it, so
+ * the space between two of them is theirs and not the card's. */
+.sockets { display: grid; gap: 10px; }
+.socket { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 12px 14px; background: var(--surface-2); }
+.socket .head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.socket .state { font-size: var(--fs-lg); font-weight: 560; }
+.socket.charging .state { color: var(--amber); }
+.socket.available .state { color: var(--green); }
+.socket .sub { color: var(--text-dim); font-size: var(--fs-sm); margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
+/* The station is one of these tiles rather than a row under them: two
+ * sliders of the same kind, half a tile's padding out of line, is what an
+ * unfinished page looks like.  Same box, same limit row, quieter fill --
+ * it is the whole station, not another socket. */
+.socket.station { background: none; }
+
+/* One piece of state, as a badge.  "relay main off, bypass off" read as a
+ * sentence about the socket; a badge each -- the switch's name, then where
+ * it is set -- reads as the two positions it actually is.  The colour comes
+ * from the charger's own words (see `tone` in dashboard.js) and stays on
+ * the value, so a tile of neutral facts does not glow. */
+.stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  font-size: var(--fs-xs);
+}
+.stat .k { color: var(--text-faint); }
+.stat .v { color: var(--text); font-weight: 560; font-variant-numeric: tabular-nums; }
+.stat.warn { border-color: var(--amber-deep); }
+.stat.warn .v { color: var(--amber); }
+.stat.good { border-color: var(--green-deep); }
+.stat.good .v { color: var(--green); }
+.stat.bad { border-color: var(--rose-deep); }
+.stat.bad .v { color: var(--rose); }
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  border: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+}
+.chip.on { border-color: var(--blue-deep); color: var(--blue-bright); background: color-mix(in srgb, var(--blue-deep) 40%, var(--surface)); }
+/* A feature the licence does not include.  Dashed against the solid edge of
+ * one it does: absence has to be legible without reading the words, or the
+ * list is just a longer list. */
+.chip.off { border-style: dashed; border-color: var(--line); color: var(--text-faint); background: none; }
+
+.badge { font-size: var(--fs-xs); letter-spacing: 0.05em; text-transform: uppercase; padding: 2px 7px; border-radius: 4px; border: 1px solid var(--line-strong); color: var(--text-dim); }
+.badge.ro { color: var(--text-dim); }
+.badge.warn { color: var(--amber); border-color: var(--amber-deep); }
+.badge.good { color: var(--green); border-color: var(--green-deep); }
+.badge.bad { color: var(--rose); border-color: var(--rose-deep); }
+
+/* --- controls ----------------------------------------------------------- */
+
+/* Buttons carry the primary colour on their edge and a little of it in
+ * their fill.  Set in the same face and weight as a field value -- which is
+ * what they sat next to -- they read as another line of data until you try
+ * to click one. */
+button.btn {
+  background: color-mix(in srgb, var(--blue) 9%, var(--surface-2));
+  color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--blue) 55%, var(--line-strong));
+  border-radius: var(--radius-sm);
+  padding: 6px 13px;
+  font-weight: 560;
+  cursor: pointer;
+  transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease;
+}
+button.btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--blue) 18%, var(--surface-2));
+  border-color: var(--blue);
+  color: var(--blue-bright);
+}
+button.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+button.btn.primary { background: var(--blue-deep); border-color: var(--blue); color: var(--blue-bright); }
+button.btn.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--blue-deep) 60%, var(--blue)); color: #fff; }
+button.btn.danger {
+  color: var(--rose);
+  background: color-mix(in srgb, var(--rose) 8%, var(--surface-2));
+  border-color: color-mix(in srgb, var(--rose) 55%, var(--line-strong));
+}
+button.btn.danger:hover:not(:disabled) { background: var(--rose-deep); border-color: var(--rose); }
+/* The quiet ones: cancels, and the per-row Edit in a table of hundreds. */
+button.btn.ghost { background: none; border-color: transparent; color: var(--text-dim); font-weight: 500; }
+button.btn.ghost:hover:not(:disabled) {
+  color: var(--blue-bright);
+  background: var(--surface-2);
+  border-color: var(--line-strong);
+}
+button.btn.small { padding: 4px 10px; font-size: var(--fs-sm); }
+/* A button's label is one line.  In a row that also holds something with
+ * `.grow` in it -- a file picker, a search box, a URL field -- the button
+ * is the item with slack to give, so a two-word label was broken across
+ * two lines and the button came out twice the height of the field beside
+ * it.  These three rows all wrap between their controls, so a label that
+ * really has nowhere to go takes the next line whole. */
+.card-foot > button.btn,
+.actions-row > button.btn,
+.toolbar > button.btn { white-space: nowrap; }
+/* A button whose whole label is one glyph -- the console's "?", the
+ * notification bell, the live-updates switch.  A square target rather
+ * than a wide one, so a lone character does not sit in a button shaped
+ * for a sentence.  Every one of these carries its own aria-label: the
+ * glyph is the picture, never the name. */
+button.btn.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  padding: 0;
+  flex: none;
+  aspect-ratio: 1;
+}
+button.btn.icon.small { width: 26px; }
+/* Live updates.  Amber is what this page reserves for electricity and
+ * for something happening, so it is what "on" looks like -- and the mark
+ * itself changes with the state rather than only its colour: a flat line
+ * while the page is holding still, a pulse while it is reading.  A screen
+ * with no colour to read still says which. */
+button.btn.icon.live { color: var(--text-faint); }
+button.btn.icon.live .beat { display: none; }
+button.btn.icon.live.on { color: var(--amber); border-color: var(--amber-deep); }
+button.btn.icon.live.on .flat { display: none; }
+button.btn.icon.live.on .beat { display: inline; }
+button.btn.icon.live:hover:not(:disabled) { color: var(--amber); }
+
+:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+input[type="text"], input[type="search"], input[type="number"], input[type="password"], select, textarea {
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 6px 9px;
+  min-width: 0;
+  transition: border-color 0.14s ease;
+}
+input:focus, select:focus, textarea:focus { border-color: var(--blue); outline: none; }
+input::placeholder { color: var(--text-faint); }
+
+/* A `<select>` sizes itself to its longest *option*, not to its value, and
+ * several of these hold whole sentences -- "ask the backoffice, then fall
+ * back to the list", "unsecured with basic authentication".  In a card's
+ * value column that is a control wider than the card, drawn straight over
+ * the border and out the other side, and it took the checkbox rows beside
+ * it with it.  Capped at the column, the closed box fits and the option
+ * that will not is cut with an ellipsis; the popup a browser opens is not
+ * the column's business and is as wide as it needs to be. */
+select {
+  max-width: 100%;
+  text-overflow: ellipsis;
+}
+
+/* A file input says two things, and only one of them is ever news.
+ *
+ * "No file selected" is the browser telling you what you already know --
+ * you have not picked one yet -- in the same colour as every reading on
+ * the page.  It is a placeholder, so it is a placeholder's grey; a
+ * filename, once there is one, is the answer to the question the card is
+ * asking and gets the text colour back.  Panels that upload the moment a
+ * file is chosen never wear `.chosen`, which is right: their box is empty
+ * again the instant it has done its job. */
+input[type="file"] { color: var(--text-faint); }
+input[type="file"].chosen { color: var(--text); }
+/* The button inside it is a control, not a label, so it is not dimmed
+ * with the sentence beside it -- and while we are in here, it may as well
+ * be this page's button rather than the browser's. */
+input[type="file"]::file-selector-button {
+  background: color-mix(in srgb, var(--blue) 9%, var(--surface-2));
+  color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--blue) 55%, var(--line-strong));
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+  margin-right: 10px;
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 560;
+  cursor: pointer;
+}
+input[type="file"]:disabled::file-selector-button { opacity: 0.45; cursor: not-allowed; }
+input[type="file"]:not(:disabled)::file-selector-button:hover {
+  background: color-mix(in srgb, var(--blue) 18%, var(--surface-2));
+  border-color: var(--blue);
+  color: var(--blue-bright);
+}
+
+label.toggle { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; user-select: none; font-size: var(--fs-sm); }
+label.toggle input { accent-color: var(--blue); }
+
+.field { display: grid; gap: 5px; }
+.field + .field { margin-top: 14px; }
+.field .lab { color: var(--text-dim); font-size: var(--fs-sm); }
+
+/* A card's one line, with the paragraph behind it.  Same shape as the
+ * caveats above -- a summary that opens -- because it is the same idea:
+ * what is worth reading every time stays out, what is worth reading once
+ * folds away. */
+.help { margin: 0 0 14px; font-size: var(--fs-sm); }
+.help > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  cursor: pointer;
+  color: var(--text-dim);
+  list-style: none;
+}
+.help > summary::-webkit-details-marker { display: none; }
+.help > summary:hover { color: var(--text); }
+.help .short { flex: 1 1 auto; }
+.help > p { margin: 7px 0 0; color: var(--text-faint); }
+
+
+/* A value that can be changed sits in the row where the reading was, so a
+ * card of settings has the same shape as a card of readings.  Currents and
+ * brightness are both small ranges with a handful of sensible answers, so
+ * both are sliders: the number beside one is the reading, and it turns amber
+ * while it is a draft nobody has applied yet. */
+/* One shape wherever a slider and its reading appear together -- in a card
+ * row, or inside a socket's own tile.  This used to be scoped to `.rows`,
+ * which left the socket limits' sliders as inline boxes that ignored every
+ * flex property aimed at them and stayed 90 px wide whatever the card. */
+.set { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.set input[type="range"] { flex: 1 1 110px; min-width: 110px; }
+/* See `--slider-lift`: the light theme's own widget shadow, and a faint
+ * light rim in its place on a page too dark for a shadow to show on. */
+input[type="range"] { accent-color: var(--blue); filter: var(--slider-lift); }
+.val {
+  font-variant-numeric: tabular-nums;
+  font-weight: 560;
+  flex: none;
+  min-width: 4.6em;
+  text-align: right;
+}
+.val.pending { color: var(--amber); }
+
+/* A typed number and the unit it is in.
+ *
+ * The unit used to wear `.val` -- the class the slider readings use, whose
+ * 4.6em right-aligned column is the width of "16.0 A".  Holding one letter,
+ * that column is four ems of nothing between the box you type in and the
+ * "A" that says what you typed: the input and its own unit read as two
+ * separate controls.  A unit is part of the number, so it sits against it;
+ * the column is kept, at the width of a unit rather than of a reading, so
+ * every input on a card still ends at the same place.
+ *
+ * And it is read from its right-hand edge, like every other value in the
+ * card.  Left-aligned inside a column wide enough for "kWh", a one-letter
+ * unit left most of that column empty *after* it -- so a row of amps ended
+ * a ragged two ems short of the card's edge while the rows around it ended
+ * against it, and the card's right margin looked broken rather than the
+ * unit looked narrow. */
+.set.num { gap: 7px; }
+.set.num > input[type="number"] { width: 90px; }
+.unit {
+  flex: none;
+  min-width: 2.2em;
+  text-align: right;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+.unit.pending { color: var(--amber); }
+/* What a slider will not go past, under the track it belongs to: the
+ * numbers are the live ceiling, so they change as the limits above them do. */
+.set .bounds {
+  flex: 1 0 100%;
+  display: flex;
+  justify-content: space-between;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  margin-top: -4px;
+}
+
+/* The temperature scale: the band the charger may sit in, and where in it
+ * -- or out of it -- the charger actually is.  Three numbers that only mean
+ * something against each other (42 C is fine under a 60 C alarm and a fault
+ * under a 40 C one), so they are drawn on one line instead of listed as
+ * three rows that have to be compared by hand. */
+.tempband { margin: 14px 0 4px; }
+.tempband .track {
+  position: relative;
+  height: 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-3);
+}
+.tempband .ok {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--green) 45%, var(--surface-3));
+}
+.tempband .now {
+  position: absolute;
+  top: -4px;
+  width: 3px;
+  height: 14px;
+  margin-left: -1.5px;
+  border-radius: 2px;
+  background: var(--text);
+}
+.tempband .now.bad { background: var(--rose); }
+.tempband .ends {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 5px;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A socket's maximum current belongs to the socket, so it is set inside the
+ * socket's own tile rather than in a card of its own. */
+.socket .limit {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.socket .limit .lab { color: var(--text-dim); font-size: var(--fs-sm); flex: none; }
+.socket .limit .set { flex: 1 1 auto; }
+
+/* Something legal that will not do what it looks like.  The card has one
+ * line for it; the whole explanation is the hover title and opens in place
+ * on a click, for touch and for keyboards. */
+.caveats { display: grid; gap: 6px; margin-top: 12px; }
+.why { font-size: var(--fs-sm); }
+.why > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  cursor: help;
+  color: var(--amber);
+  list-style: none;
+}
+.why > summary::-webkit-details-marker { display: none; }
+.why .mark {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  border: 1px solid var(--amber);
+  border-radius: 50%;
+  font-size: 10px;
+  line-height: 13px;
+  text-align: center;
+  align-self: center;
+}
+.why .short { flex: 1 1 auto; }
+.why > p { margin: 6px 0 0 22px; color: var(--text-dim); }
+
+/* What says a line opens, wherever one does.
+ *
+ * This was the word "more" on a card's summary and the word "why?" on a
+ * caveat, set small and faint at the right-hand end -- two different
+ * labels for one gesture, neither of which looks like anything until it
+ * is read, and both of which vanished once the line was open so that the
+ * way to close it again was to guess.  A chevron is the disclosure
+ * control every reader already knows, it is the same mark the sessions
+ * table opens its rows with (`tr.openable .twist`), and it turns rather
+ * than disappearing -- so the shape says which way the line is now. */
+.chev {
+  flex: none;
+  /* A rotation needs a box to turn, and the summaries these sit in align
+   * on the baseline -- which is not where the middle of a chevron is. */
+  display: inline-block;
+  align-self: center;
+  width: 0.8em;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  line-height: 1;
+  transition: transform 0.15s ease;
+}
+summary:hover > .chev { color: var(--text-dim); }
+details[open] > summary > .chev { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) {
+  .chev { transition: none; }
+}
+
+/* Nothing is written until this row says so: a card of settings is edited
+ * as a whole and applied once, so a stray keystroke cannot reach a charger
+ * that is mid-charge. */
+.card-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  /* `auto` rather than a fixed margin: the cards in a row are one height
+   * now, so the row that commits a card's edits belongs against its bottom
+   * edge, not floating wherever the fields above it happened to end. */
+  margin-top: auto;
+  padding-top: 13px;
+  border-top: 1px solid var(--line);
+}
+/* The gap the footer's own margin used to hold open, moved to the element
+ * above it -- an `auto` margin spends itself on the free space and has
+ * nothing left over for the card that is already as tall as its row. */
+.card > *:has(+ .card-foot) { margin-bottom: 16px; }
+.card-foot .state { color: var(--text-faint); font-size: var(--fs-sm); }
+.card-note { color: var(--amber); font-size: var(--fs-sm); margin-top: 12px; }
+
+/* --- tables -------------------------------------------------------------- */
+
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+thead th {
+  position: sticky;
+  top: 0;
+  background: var(--surface-2);
+  text-align: left;
+  font-weight: 560;
+  font-size: var(--fs-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 10px 13px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+tbody td { padding: 8px 13px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: var(--surface); }
+td.name { color: var(--text); }
+td.val { color: var(--text); }
+/* What the property is, in the catalog's words, above what it is called by
+ * the parameter name and the protocol id -- which are what you search by
+ * and almost never what you want to read first. */
+.prop-name { color: var(--text); font-weight: 560; }
+.badge.cat { margin-top: 4px; display: inline-block; text-transform: none; letter-spacing: 0; }
+/* Values start where their column's heading starts: a value read as a word
+ * reads from its start, and against the heading that names it, not against
+ * the numbers of some other row.  The `.val` above is the slider reading in
+ * a card, which ends at the card's edge; the table cell is not that. */
+td.val { text-align: left; }
+td.val.num { font-variant-numeric: tabular-nums; }
+/* The action column's button ends where the card does. */
+td.right, th.right { text-align: right; }
+/* Two buttons in one action cell -- "show" then "apply" -- are two
+ * controls, not one word. */
+td.right .btn + .btn { margin-left: 7px; }
+/* The two columns that hold four characters and a button: `width: 1%` with
+ * nothing to wrap is the shrink-to-fit idiom, so the property and its value
+ * -- which are what the page is for -- get the width instead. */
+td.type, th.type, td.right, th.right { width: 1%; white-space: nowrap; }
+.prop-title { color: var(--text-dim); font-size: var(--fs-xs); margin-top: 2px; }
+.prop-title.data { font-family: var(--mono); color: var(--text-faint); white-space: nowrap; }
+
+/* --- logs ---------------------------------------------------------------- */
+
+.logs {
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.6;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  max-height: min(72vh, 1000px);
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.logline { display: flex; gap: 10px; }
+.logline .ts { color: var(--text-dim); flex: none; }
+.logline .msg { flex: 1 1 auto; }
+.logline.ERROR .msg { color: var(--rose); }
+.logline.WARNING .msg { color: var(--amber); }
+.logline.USER .msg { color: var(--blue-bright); }
+.logline.CHARGING .msg { color: var(--green); }
+.gap-note { color: var(--amber); font-style: italic; }
+
+/* --- jobs ---------------------------------------------------------------- */
+
+.job { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 11px 13px; background: var(--surface-2); }
+.job + .job { margin-top: 9px; }
+.job .head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+.job .msg { color: var(--text-dim); font-size: var(--fs-sm); margin-top: 4px; }
+.job .err { color: var(--rose); font-size: var(--fs-sm); margin-top: 5px; }
+
+/* Scoped to the two blocks that use it: see `.chart .col` above for what a
+ * bare `.bar` did to an SVG rect that happened to share the name. */
+.job .bar, .reading .bar {
+  height: 5px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  overflow: hidden;
+  margin-top: 9px;
+}
+.job .bar > span, .reading .bar > span {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--bar-from), var(--bar-to));
+  transition: width 0.3s ease;
+}
+.job.done .bar > span { background: var(--green); }
+.job.failed .bar > span { background: var(--rose); }
+
+/* --- watchers and releases ------------------------------------------------ */
+
+/* Lists of things that arrived from outside: the browsers on this server,
+ * and the images on Alfen's.  Both are rows of one identifier and a line
+ * about it, so they share a shape. */
+.entry {
+  display: grid;
+  gap: 3px;
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.entry + .entry { margin-top: 8px; }
+.entry .head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.entry .name { font-weight: 560; }
+.entry .name.data { font-family: var(--mono); font-size: var(--fs-sm); font-weight: 500; overflow-wrap: anywhere; }
+.entry .meta { color: var(--text-dim); font-size: var(--fs-sm); }
+.entry .act { margin-left: auto; }
+.entry.best { border-color: var(--blue-deep); background: color-mix(in srgb, var(--blue-deep) 30%, var(--surface-2)); }
+/* An image that cannot be the next step is dimmed nowhere: the reason is
+ * the point, so it is the reason that gets the warning colour. */
+.entry.blocked .name { color: var(--text-dim); }
+.entry.blocked .reason { color: var(--amber); }
+.entry.you { border-color: var(--blue-deep); }
+.scroller { max-height: min(52vh, 460px); overflow-y: auto; padding-right: 2px; }
+
+/* --- dialogs and toasts --------------------------------------------------- */
+
+.backdrop {
+  position: fixed; inset: 0; z-index: 60;
+  background: rgba(0, 0, 0, 0.72);
+  display: grid; place-items: center; padding: 20px;
+}
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  padding: 20px 22px;
+  width: min(460px, 100%);
+  display: grid;
+  gap: 14px;
+}
+.modal h3 { margin: 0; font-size: var(--fs-lg); }
+.modal p { margin: 0; color: var(--text-dim); }
+.modal .buttons { display: flex; justify-content: flex-end; gap: 8px; }
+
+.toasts { position: fixed; right: 18px; bottom: 18px; z-index: 80; display: grid; gap: 8px; width: min(400px, calc(100vw - 36px)); }
+.toast {
+  border: 1px solid var(--line-strong);
+  border-left-width: 3px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  padding: 11px 13px;
+  font-size: 14px;
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  animation: slide-in 0.16s ease-out;
+}
+.toast.error { border-left-color: var(--rose); }
+.toast.ok { border-left-color: var(--green); }
+.toast.info { border-left-color: var(--blue); }
+.toast .x { margin-left: auto; cursor: pointer; color: var(--text-faint); background: none; border: 0; }
+@keyframes slide-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* Nothing here, said in the space one sentence needs.  This was 30px of
+ * padding above and below, which on the Properties tab -- where the empty
+ * state is the whole page until a category is read -- is a card mostly
+ * made of nothing, above the one control that would fill it. */
+.empty { color: var(--text-dim); padding: 16px 4px; text-align: center; }
+
+/* What a card looks like on its way in: the shape of the rows that are
+ * coming, so the grid is already the right size when they land. */
+.skeleton { display: grid; gap: 12px; padding: 4px 0; }
+.skeleton .bone {
+  height: 11px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--surface-2), var(--surface-3), var(--surface-2));
+  background-size: 300% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+}
+.skeleton .bone:nth-child(2n) { width: 82%; }
+.skeleton .bone:nth-child(3n) { width: 64%; }
+@keyframes shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton .bone { animation: none; }
+}
+
+/* Explanatory prose under a card's title -- read as text, not as a caption. */
+.note { color: var(--text-dim); font-size: var(--fs-sm); margin: 0 0 14px; }
+.toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+/* The three shapes a panel arranges controls in, so they are one shape
+ * rather than forty inline `style="display:flex;gap:10px"` attributes that
+ * each drifted a pixel or two from the others. */
+.actions-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.actions-row.centred { justify-content: center; margin-top: 12px; }
+/* A row of controls that follows something else in a card keeps its
+ * distance from it, so the gap is the card's and not each caller's guess. */
+.card > .actions-row:not(:first-child) { margin-top: 12px; }
+.stack { display: grid; gap: 6px; }
+/* Buttons one to a row, at one width: three "Erase ..." labels do not fit
+ * a card's width side by side, and wrapped they are three buttons of the
+ * same kind at three different left edges. */
+.buttons-col { grid-template-columns: max-content; gap: 8px; }
+.grow { flex: 1 1 auto; min-width: 180px; }
+.grow.narrow { flex: 1 1 90px; min-width: 90px; }
+.spaced { margin-top: 12px; }
+.small { font-size: var(--fs-sm); }
+/* How many of something is shown, above the table showing it. */
+.count { margin-bottom: 8px; }
+/* Prose that carries its own spacing already -- inside a dialog, or beside
+ * a control in a toolbar. */
+.note.flush { margin: 0; }
+.card-note.bad { color: var(--rose); }
+/* A station in the picker: a name and an address, read left to right. */
+button.btn.pick { justify-content: flex-start; text-align: left; }
+/* A field holding a draft nobody has applied yet, in the same amber the
+ * numbers and sliders use for it. */
+input.pending { border-color: var(--amber); }
+
+
+/* A row the last read brought in.
+ *
+ * A read used to append what it found, so a hundred fresh rows landed
+ * below whatever was already there and the answer to "did that do
+ * anything" was somewhere off the bottom of the page.  They go to the top
+ * now, and they say so for a few seconds: the highlight fades out rather
+ * than blinking, because a table of two hundred rows all flashing at once
+ * is a fault light, not an answer.
+ *
+ * The animation is on the background alone, so nothing moves and no text
+ * changes colour -- and a screen that has asked for less motion keeps the
+ * tint for the same few seconds without the fade. */
+tr.arrived > td { animation: arrived 4s ease-out; }
+@keyframes arrived {
+  0% { background: color-mix(in srgb, var(--blue) 26%, transparent); }
+  55% { background: color-mix(in srgb, var(--blue) 22%, transparent); }
+  100% { background: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  tr.arrived > td {
+    animation: none;
+    background: color-mix(in srgb, var(--blue) 16%, transparent);
+  }
+}
+
+/* A summary row that opens to what it summarises. */
+tr.openable { cursor: pointer; }
+tr.openable:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+tr.openable .twist { color: var(--text-faint); display: inline-block; width: 1.2em; }
+tr.openable.open { background: var(--surface-2); }
+tr.opened > td { padding: 0 13px 12px; background: var(--surface-2); }
+tr.total td { font-weight: 560; border-top: 1px solid var(--line-strong); }
+
+/* A property being edited, and the row its editor opens under it.
+ *
+ * The editor is a dropdown and two buttons where the reading is "16", and
+ * a table's columns are as wide as their widest cell -- so putting it in
+ * the value cell widened that column for every one of four hundred rows,
+ * and narrowed it again on Cancel.  A cell spanning the whole row belongs
+ * to no column and moves none of them.  The two rows are drawn as one:
+ * the same lifted fill, and no rule between them. */
+tr.editing > td { background: var(--surface-2); border-bottom: 0; }
+tr.editor > td { padding: 4px 13px 12px; background: var(--surface-2); }
+.table-wrap.inset { border-radius: var(--radius-sm); background: var(--surface); }
+
+/* One row's share of the largest in its column, drawn behind the number.
+ * Twelve months of kWh is twelve numbers to compare by eye; this is what
+ * makes the tall one obvious without reading any of them. */
+.meter { position: relative; display: inline-flex; justify-content: flex-end; min-width: 9ch; padding: 1px 5px; }
+.meter .fill {
+  position: absolute;
+  inset: 0 0 0 auto;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--blue) 26%, transparent);
+}
+.meter .figure { position: relative; }
+
+/* Wide enough for the longest category name before the list has arrived:
+ * the select used to be as wide as its one placeholder and then jump, which
+ * moved every control beside it every time the tab was opened. */
+.toolbar select { min-width: 22ch; }
+/* --- narrower screens ------------------------------------------------------
+ *
+ * Same page, not a cut-down one: the columns collapse, the chrome wraps and
+ * the horizontal scrollers (the tab strip, the property table) take over.
+ * Nothing here shrinks the type -- a phone in a garage is the worst place
+ * to read 11px labels. */
+
+@media (max-width: 900px) {
+  .grid { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+  /* Two of two columns is the whole row anyway. */
+  .card.wide { grid-column: 1 / -1; }
+  :root { --label-col: 8rem; }
+
+}
+
+
+
+@media (max-width: 760px) {
+  header.top { flex-wrap: wrap; row-gap: 10px; }
+  /* The dot and the button stay; the sentence is in .sr-only either way. */
+  header.top .offline-note .what { display: none; }
+  header.top .station-id { order: 3; flex: 1 1 100%; }
+  header.top .conn { min-width: 0; }
+  header.top .pill { max-width: 100%; }
+
+  main { padding: 18px var(--gutter) 56px; }
+  .card { padding: 15px 16px; }
+  .rows { gap: 8px 12px; }
+  .conn-menu { width: min(430px, calc(100vw - 20px)); }
+  .toasts { right: 10px; left: 10px; bottom: 10px; width: auto; }
+
+  .logs { max-height: 60vh; }
+}
+
+@media (max-width: 560px) {
+  /* The label above its value, so a key or a timestamp gets the whole
+   * width of the card rather than a third of it.  Stacked, there is no
+   * column of values for one to line up with, and a value pushed to the
+   * far edge from the label above it only looks lost -- so the alignment
+   * that makes two columns tidy is dropped along with the second column. */
+  .rows, .row2 { grid-template-columns: 1fr; gap: 2px; }
+  .rows .row2 + .row2 .k { margin-top: 9px; }
+  .row2 .v { text-align: left; }
+  .row2 .v > .set, .row2 .v > .toggle, .row2 .v > .chips { justify-content: flex-start; }
+}
+
+@media (max-width: 460px) {
+  .phases { grid-template-columns: 1fr; }
+  .metric-value { font-size: 30px; }
+  .toolbar > * { flex: 1 1 auto; }
+}

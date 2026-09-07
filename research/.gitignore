@@ -1,0 +1,15 @@
+# The guides and findings tables are tracked; the material they were
+# extracted from (vendor installers, the Android APK and its decompiled
+# dumps, the alfen-wallbox checkout, charger artifacts and firmware files)
+# stays local.
+/android/*
+!/android/android-guide.md
+!/android/android-findings.md
+/home-assistant/*
+!/home-assistant/ha-guide.md
+!/home-assistant/ha-findings.md
+/windows/*
+!/windows/windows-guide.md
+!/windows/windows-findings.md
+/artifacts/
+/firmware/
