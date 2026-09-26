@@ -30,14 +30,18 @@ the last page the charger still answers with; see its docstring.
 from __future__ import annotations
 
 import re
-import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Protocol, Sequence
 
+from devicectl.progress import (
+    SECONDS_PER_DAY,
+    SECONDS_PER_HOUR,
+    SECONDS_PER_MINUTE,
+)
+
 from alfenctl.errors import AlfenError
-from alfenctl.progress import bar, end_live, fmt_duration, write_live
 
 # The app's `&lines=` page size, sent on AHP >= 2.4 only (ICULanDevice
 # .s_nMaxLogLines); other firmware picks the page size itself.
@@ -61,10 +65,6 @@ _LINE_RE = re.compile(
 )
 # The charger colours some log text; the app strips exactly this.
 _ANSI_RE = re.compile(r"\x1b\[(?:\d*;)?\d*m")
-
-SECONDS_PER_MINUTE = 60
-SECONDS_PER_HOUR = 3600
-SECONDS_PER_DAY = 86400
 
 
 class _LogSource(Protocol):
@@ -495,55 +495,3 @@ def probe_range(
         page_lines=page_lines,
         requests=requests,
     )
-
-
-# --- Terminal progress -------------------------------------------------------------------
-
-
-@dataclass
-class DownloadProgress:
-    """Draws the download's live stderr line (or logs it, in ``--debug``)."""
-
-    since: datetime | None
-    debug: bool = False
-    now: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    _last_draw: float = field(default=0.0, init=False)
-
-    def fraction(self, reached: datetime | None) -> float | None:
-        """How much of the requested span is covered, or None when unbounded."""
-        if self.since is None or reached is None:
-            return None
-        span = (self.now - self.since).total_seconds()
-        if span <= 0:
-            return 1.0
-        return max(0.0, min(1.0, (self.now - reached).total_seconds() / span))
-
-    def __call__(self, state: Download, *, final: bool = False) -> None:
-        """Redraw (or log) the line for one just-fetched page."""
-        reached = state.oldest
-        frac = 1.0 if final else self.fraction(reached)
-        back = f"back to {format_time(reached)}" if reached else "reading"
-        if self.debug:
-            if not final:
-                print(
-                    f"[debug] -- log page {state.pages}: {state.fetched} lines, {back}",
-                    file=sys.stderr,
-                )
-            return
-        now = time.monotonic()
-        if not final and now - self._last_draw < PROGRESS_MIN_INTERVAL_S:
-            return  # throttle mid-download redraws, but always draw the last one
-        self._last_draw = now
-        shown = f"[{bar(frac)}] {frac:4.0%}  " if frac is not None else ""
-        write_live(
-            f"  Downloading log  {shown}{state.fetched} lines  {back}  "
-            f"elapsed {fmt_duration(state.seconds)}"
-        )
-
-    def finish(self, state: Download | None = None) -> None:
-        """Draw the completed line and close it (a no-op in debug mode)."""
-        if self.debug:
-            return
-        if state is not None and state.fetched:
-            self(state, final=True)
-        end_live()

@@ -4,20 +4,18 @@ from __future__ import annotations
 
 import base64
 import json
-import time
 from collections.abc import Callable
 
 import httpx
 import pytest
 
-import alfenctl.charger as charger_mod
-
+import alfenctl.transport as transport_mod
+from alfenctl.charger import AlfenCharger
 from alfenctl.discovery import Station
-
-from alfenctl.charger import (
+from alfenctl.errors import AlfenError
+from alfenctl.transport import (
     CONNECT_TIMEOUT_S,
     UPLOAD_WRITE_SIZE,
-    AlfenCharger,
     UploadError,
     _FixedChunkStream,
     parse_prop_id,
@@ -152,6 +150,12 @@ def test_default_requests_keep_the_client_timeout(make_charger) -> None:
     assert seen == [CONNECT_TIMEOUT_S]
 
 
+def test_diagnostic_result_rejects_non_json_response(make_charger) -> None:
+    with make_charger(lambda request: httpx.Response(200, text="not JSON")) as ch:
+        with pytest.raises(AlfenError):
+            ch.fetch_diagnostic_result()
+
+
 def test_properties_pagination_follows_local_offset(make_charger) -> None:
     offsets: list[int] = []
 
@@ -249,7 +253,7 @@ def test_basic_info_maps_properties(make_charger) -> None:
 
 
 def test_basic_info_model_falls_back_to_device_name() -> None:
-    st = charger_mod.Station(
+    st = transport_mod.Station(
         ip="10.0.0.1", port=443, hostname="alfen-ace0781464.local."
     )
     ch = AlfenCharger(
@@ -310,59 +314,6 @@ def test_firmware_status_empty_body(make_charger) -> None:
         assert ch.firmware_status() == (False, 0)
 
 
-def test_set_datetime_sends_date_command(make_charger) -> None:
-    seen: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        request.read()
-        seen.append(request)
-        return httpx.Response(200)
-
-    with make_charger(handler) as ch:
-        ch.set_datetime()
-        ch.set_datetime(is_ahp=True)
-    # Like the app's SetDate: sysDateTime first, then tell the firmware.
-    assert seen[0].url.path == "/api/prop"
-    assert json.loads(seen[0].content)["2059_0"]["value"] > 1_700_000_000_000
-    assert seen[1].url.path == "/api/cmd"
-    assert json.loads(seen[1].content)["command"].startswith("date 20")
-    assert seen[3].url.path == "/api/datetime"
-    assert seen[3].content.startswith(b'"20')  # ISO-ish timestamp, JSON-quoted
-
-
-def test_set_datetime_takes_an_explicit_moment(make_charger) -> None:
-    from datetime import datetime, timezone
-
-    seen: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        request.read()
-        seen.append(request)
-        return httpx.Response(200)
-
-    when = datetime(2026, 9, 4, 20, 31, 2, tzinfo=timezone.utc)
-    with make_charger(handler) as ch:
-        ch.set_datetime(when=when)
-    assert json.loads(seen[0].content)["2059_0"]["value"] == 1788553862000
-    assert json.loads(seen[1].content)["command"] == "date 2026-09-04 20:31:02"
-
-
-def test_set_datetime_survives_a_charger_without_the_property(make_charger) -> None:
-    """Old firmware refuses the property write; the command still goes."""
-    seen: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        request.read()
-        seen.append(request)
-        if request.url.path == "/api/prop" and request.method == "POST":
-            return httpx.Response(404)
-        return httpx.Response(200)
-
-    with make_charger(handler) as ch:
-        ch.set_datetime()
-    assert [r.url.path for r in seen][-1] == "/api/cmd"
-
-
 def test_set_domain_item_hex_encodes_the_value(make_charger) -> None:
     seen: list[httpx.Request] = []
 
@@ -405,7 +356,7 @@ def test_fixed_chunk_stream_yields_small_chunks() -> None:
 
 
 def test_upload_firmware_builds_single_part(make_charger, monkeypatch) -> None:
-    monkeypatch.setattr(charger_mod, "CONNECTION_RELEASE_PAUSE_S", 0.0)
+    monkeypatch.setattr(transport_mod, "CONNECTION_RELEASE_PAUSE_S", 0.0)
     captured: dict[str, httpx.Request] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -437,7 +388,7 @@ def test_upload_firmware_builds_single_part(make_charger, monkeypatch) -> None:
 
 
 def test_upload_firmware_retries_once_on_401(make_charger, monkeypatch) -> None:
-    monkeypatch.setattr(charger_mod, "CONNECTION_RELEASE_PAUSE_S", 0.0)
+    monkeypatch.setattr(transport_mod, "CONNECTION_RELEASE_PAUSE_S", 0.0)
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -454,7 +405,7 @@ def test_upload_firmware_retries_once_on_401(make_charger, monkeypatch) -> None:
 
 
 def test_upload_firmware_rejected_raises(make_charger, monkeypatch) -> None:
-    monkeypatch.setattr(charger_mod, "CONNECTION_RELEASE_PAUSE_S", 0.0)
+    monkeypatch.setattr(transport_mod, "CONNECTION_RELEASE_PAUSE_S", 0.0)
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/login":
@@ -580,32 +531,6 @@ def test_fetch_charging_profile_ids_raises_on_404(make_charger) -> None:
     with make_charger(handler) as ch:
         with pytest.raises(httpx.HTTPStatusError):
             ch.fetch_charging_profile_ids()
-
-
-def test_set_datetime_stamps_the_command_when_it_is_sent(make_charger) -> None:
-    """The command is stamped fresh, not from before the property write.
-
-    The command is what actually moves the clock, and it leaves a whole
-    round trip after the method was entered.  Stamping both from one reading
-    left the charger that far behind for as long as it ran.
-    """
-    from datetime import datetime, timezone
-
-    seen: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        request.read()
-        seen.append(request)
-        if request.url.path == "/api/prop":
-            time.sleep(1.2)  # a slow charger answering the property write
-        return httpx.Response(200)
-
-    entered = datetime.now(timezone.utc)
-    with make_charger(handler) as ch:
-        sent = ch.set_datetime()
-    stamp = json.loads(seen[1].content)["command"].removeprefix("date ")
-    assert stamp == sent.strftime("%Y-%m-%d %H:%M:%S")
-    assert (sent - entered).total_seconds() >= 1.0
 
 
 def test_debug_logging_redacts_secrets(make_charger, capsys) -> None:

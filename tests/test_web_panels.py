@@ -10,10 +10,10 @@ from __future__ import annotations
 import json
 
 import pytest
-
-from alfenctl.web import api
 from webfake import call
 
+from alfenctl import authorization as auth_mod
+from alfenctl.web import api
 
 # --- reads -----------------------------------------------------------------------------------
 
@@ -28,13 +28,15 @@ def test_loadbalancing_comes_with_its_option_tables(context):
     _, doc = call(context, "GET", "/api/lb")
     lb = doc["loadbalancing"]
     assert lb["static"] is not None
-    assert lb["options"]["protocols"]
-    assert lb["bounds"]["minSafeCurrentA"] == 0.0
+    # Both tables are keyed by the field's own JSON name, so a card that has
+    # a value has its options and its range without a second name to learn.
+    assert lb["options"]["protocol"]
+    assert lb["bounds"]["safeCurrentA"] == {"min": 0.0, "max": 100.0}
 
 
 def test_authorization_arrives_with_its_option_tables(context):
     _, doc = call(context, "GET", "/api/auth")
-    assert doc["authorization"]["options"]["modes"] == {
+    assert doc["authorization"]["options"]["mode"] == {
         "0": "plug and charge",
         "2": "RFID reader",
     }
@@ -42,7 +44,8 @@ def test_authorization_arrives_with_its_option_tables(context):
 
 def test_ocpp_arrives_with_its_option_tables(context):
     _, doc = call(context, "GET", "/api/ocpp")
-    assert "connectMethods" in doc["ocpp"]["options"]
+    assert "connectMethod" in doc["ocpp"]["options"]
+    assert doc["ocpp"]["bounds"]["heartbeatS"] == {"min": 0, "max": 86400}
 
 
 def test_the_whitelist_is_read_and_rendered(context):
@@ -68,6 +71,19 @@ def test_a_tag_action_without_a_list_is_refused(context):
     with pytest.raises(api.ApiError) as caught:
         call(context, "POST", "/api/tags", {"action": "add"})
     assert caught.value.status == 400
+
+
+def test_connectivity_reports_where_the_charger_is_reachable(context):
+    """The endpoint the Connectivity tab reads, under the key it reads it by.
+
+    Both were called `network` until that word was needed for the charging
+    network an operator runs.  A page asking `/api/network` for `.network`
+    would have gone on drawing an empty Interfaces card rather than failing,
+    which is why this is pinned rather than left to the browser.
+    """
+    _, doc = call(context, "GET", "/api/connectivity")
+    assert "connectivity" in doc
+    assert {"mac", "wiredAddress", "wifiEnabled", "rows"} <= set(doc["connectivity"])
 
 
 def test_the_wifi_scan_lists_networks_with_signal_words(context):
@@ -178,12 +194,23 @@ def test_a_load_balancing_value_out_of_bounds_is_refused(context):
     assert context.worker.charger.writes == []
 
 
+def test_the_whitelist_switch_is_named_the_same_writing_as_reading(context):
+    # It was not: the panel sent `whitelistEnabled`, which is what the read
+    # answers with, and the handler looked for `whitelist` -- so the two
+    # switches on the Authorization card wrote nothing at all.
+    _, before = call(context, "GET", "/api/auth")
+    assert "whitelistEnabled" in before["authorization"]
+    call(context, "POST", "/api/auth", {"whitelistEnabled": True})
+    written = [k for payload in context.worker.charger.writes for k in payload]
+    assert auth_mod.P_WHITELIST_ENABLED in written
+
+
 def test_writing_authorization_splits_the_offline_action(context):
     call(
         context,
         "POST",
         "/api/auth",
-        {"mode": 2, "whitelist": True, "offlineAction": 3},
+        {"mode": 2, "whitelistEnabled": True, "offlineAction": 3},
     )
     keys = [k for payload in context.worker.charger.writes for k in payload]
     assert (0x2127, 0) in keys and (0x213E, 0) in keys  # the two halves
@@ -317,6 +344,41 @@ def test_a_restore_previews_the_diff_without_writing(context):
     assert context.worker.charger.writes == []
 
 
+def test_a_restore_preview_names_what_it_will_not_write(context):
+    # The browser used to be told a number of device-bound properties and
+    # nothing at all about the read-only ones, while the terminal listed
+    # both by id and name.  One plan behind both now, so it says the same.
+    request = api.Request(
+        method="POST",
+        path="/api/restore",
+        body=json.dumps(
+            [
+                {"id": "2062_0", "value": 20},  # an ordinary change
+                {"id": "2201_0", "value": 30},  # read-only: the temperature
+                {"id": "2180_1", "value": "theirs"},  # device-bound
+            ]
+        ).encode(),
+    )
+    doc = json.loads(api.post_restore(context, request).body)
+    assert [c["id"] for c in doc["changes"]] == ["2062_0"]
+    assert [p["id"] for p in doc["skippedReadOnly"]] == ["2201_0"]
+    assert [p["id"] for p in doc["skippedBound"]] == ["2180_1"]
+    assert context.worker.charger.writes == []
+
+
+def test_a_restore_forced_writes_a_device_bound_property(context):
+    request = api.Request(
+        method="POST",
+        path="/api/restore",
+        query={"apply": "1", "force": "1"},
+        body=json.dumps([{"id": "2180_1", "value": "theirs"}]).encode(),
+    )
+    doc = json.loads(api.post_restore(context, request).body)
+    assert doc["applied"] == 1
+    assert doc["skippedBound"] == []
+    assert (0x2180, 1) in context.worker.charger.writes[0]
+
+
 def test_a_restore_applied_writes_what_the_preview_showed(context):
     request = api.Request(
         method="POST",
@@ -333,25 +395,23 @@ def test_a_restore_applied_writes_what_the_preview_showed(context):
 # --- read-only mode ------------------------------------------------------------------------------
 
 
-def test_every_panel_write_is_refused_when_read_only(context):
-    context.read_only = True
-    try:
-        for path, body in (
-            ("/api/lb", {"static": True}),
-            ("/api/auth", {"mode": 2}),
-            ("/api/ocpp", {"heartbeatS": 60}),
-            ("/api/tags", {"action": "clear"}),
-            ("/api/master-tag", {"tag": "X"}),
-            ("/api/wifi", {"action": "enable"}),
-            ("/api/profiles", {"action": "clear", "id": "all"}),
-            ("/api/direct-start", {"sockets": [1], "direct": True}),
-            ("/api/scn", {"action": "leave"}),
-            ("/api/password", {"action": "set", "password": "x"}),
-            ("/api/tilt", {}),
-            ("/api/console", {"command": "date"}),
-            ("/api/erase", {"target": "transactions"}),
-        ):
-            route = api.ROUTES[("POST", path)]
-            assert route.write, f"{path} is not marked as a write"
-    finally:
-        context.read_only = False
+def test_every_panel_write_says_that_it_writes():
+    """`--read-only` is enforced off `Route.write`, so a route that forgets it
+    is a control that stays live on a server shared read-only.  The refusal
+    itself is the shared server's and is tested there."""
+    for path in (
+        "/api/lb",
+        "/api/auth",
+        "/api/ocpp",
+        "/api/tags",
+        "/api/master-tag",
+        "/api/wifi",
+        "/api/profiles",
+        "/api/direct-start",
+        "/api/scn",
+        "/api/password",
+        "/api/tilt",
+        "/api/console",
+        "/api/erase",
+    ):
+        assert api.ROUTES[("POST", path)].write, f"{path} is not marked as a write"

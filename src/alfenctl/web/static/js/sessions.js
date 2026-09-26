@@ -13,10 +13,10 @@
  * away for anyone who wants to read the lot.
  */
 
-import { html, useState } from '../vendor/preact-htm.module.js';
-import { acrossPlot, Hovered, useHover } from './chart.js';
-import { Loading, PanelError, usePanel } from './panels.js';
-import { Card, Progress, Select } from './ui.js';
+import { acrossPlot, Hovered, useHover } from '/core/js/chart.js';
+import { panelWait, usePanel } from '/core/js/panels.js';
+import { Card, Chev, Progress, Select } from '/core/js/ui.js';
+import { html, useState } from '/core/vendor/preact-htm.module.js';
 
 const VIEWS = [
   { value: 'day', title: 'by day' },
@@ -334,7 +334,7 @@ function Summary({ view, groups, total, sessions }) {
               }}
             >
               <td class="data">
-                <span class="twist" aria-hidden="true">${showing ? '▾' : '▸'}</span>${r.key}
+                <span class="twist"><${Chev} down=${showing} /></span>${r.key}
               </td>
               <td class="val num right">${r.sessions}</td>
               <td class="val num right"><${Energy} kwh=${r.energyKwh} of=${biggest} /></td>
@@ -367,24 +367,23 @@ function Summary({ view, groups, total, sessions }) {
 }
 
 export function Sessions({ api, busy, link }) {
-  const [doc, loading, error, read] = usePanel('transactions', () => api.get('/transactions'));
+  const panel = usePanel('transactions', () => api.get('/transactions'));
+  const [doc, loading, , read] = panel;
   const [view, setView] = useState('month');
   const [socket, setSocket] = useState('');
 
-  /* Titled, so both of these render as a card rather than a loose div:
+  /* Titled, so either of these renders as a card rather than a loose div:
    * the tab keeps the shape it will have once the read lands, instead of
-   * changing from a bare block into a toolbar and a table. */
-  if (error)
-    return html`<${PanelError}
-      error=${error}
-      loading=${loading}
-      onRetry=${read}
-      title="Charging sessions"
-    />`;
-  if (!doc) {
+   * changing from a bare block into a toolbar and a table.  The bar above
+   * it is what says the read is a charger round trip rather than a hang. */
+  const waiting = panelWait(panel, {
+    title: 'Charging sessions',
+    what: 'Reading charging sessions...',
+  });
+  if (waiting) {
     return html`<div>
       <${Progress} link=${link} what="Reading charging sessions" />
-      <${Loading} loading=${loading} what="Reading charging sessions..." title="Charging sessions" />
+      ${waiting}
     </div>`;
   }
 
@@ -405,12 +404,12 @@ export function Sessions({ api, busy, link }) {
     <div class="toolbar">
       <${Select}
         value=${view}
-        onChange=${(e) => setView(e.target.value)}
+        onChange=${setView}
         entries=${VIEWS}
       />
       <${Select}
         value=${socket}
-        onChange=${(e) => setSocket(e.target.value)}
+        onChange=${setSocket}
         entries=${[
           { value: '', title: 'every socket' },
           ...sockets.map((n) => ({ value: String(n), title: `socket ${n}` })),

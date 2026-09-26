@@ -1,7 +1,7 @@
 """Tests for the upgrade sequence, driven by a fake charger.
 
 Nothing here looks at output: :mod:`alfenctl.upgrade` reports to a
-:class:`~alfenctl.report.Reporter`, so what it says is checked by reading
+:class:`~devicectl.report.Reporter`, so what it says is checked by reading
 the recorder below.  What the CLI *prints* is tested in test_cli_firmware.
 """
 
@@ -11,11 +11,11 @@ import time
 
 import httpx
 import pytest
+from devicectl.report import Reporter, Wait
 
 import alfenctl.upgrade as upgrade_mod
 from alfenctl.charger import ChargerInfo
 from alfenctl.firmware import FW_UPDATE_DONE
-from alfenctl.report import Reporter, Wait
 from alfenctl.upgrade import InstallFailed, UploadInProgress, install, send_image
 
 INFO = ChargerInfo(
@@ -70,8 +70,11 @@ class FakeCharger:
         self.calls.append("basic_info")
         return INFO
 
-    def set_datetime(self, is_ahp: bool = False, when=None):
-        self.calls.append(f"set_datetime(is_ahp={is_ahp})")
+    def write_properties(self, writes) -> None:
+        self.calls.append("write_properties")
+
+    def send_clock(self, stamp: str, *, is_ahp: bool = False) -> None:
+        self.calls.append(f"send_clock(is_ahp={is_ahp})")
 
     def firmware_status(self, timeout: float | None = None) -> tuple[bool, int]:
         self.calls.append("firmware_status")
@@ -107,8 +110,11 @@ def test_send_image_sets_the_clock_before_uploading() -> None:
     send_image(charger, IMAGE, report=report, label="Uploading firmware")
 
     # The app's order: clock, then the in-progress check, then the image.
+    # Setting the clock is two calls -- the property and the command the
+    # firmware actually acts on; see `alfenctl.clock.set`.
     assert charger.calls == [
-        "set_datetime(is_ahp=False)",
+        "write_properties",
+        "send_clock(is_ahp=False)",
         "firmware_status",
         "upload_firmware",
     ]
@@ -118,7 +124,7 @@ def test_send_image_sets_the_clock_before_uploading() -> None:
 def test_send_image_tells_an_ahp_charger_apart() -> None:
     charger = FakeCharger()
     send_image(charger, IMAGE, is_ahp=True)
-    assert "set_datetime(is_ahp=True)" in charger.calls
+    assert "send_clock(is_ahp=True)" in charger.calls
 
 
 def test_send_image_refuses_when_an_upload_is_already_running() -> None:

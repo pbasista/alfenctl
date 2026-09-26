@@ -10,6 +10,7 @@ import zlib
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from alfenctl import logo
 from alfenctl.logo import (
@@ -22,8 +23,6 @@ from alfenctl.logo import (
     convert_image,
     crc32,
 )
-
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 RECORD = "<BBHHHIIBBHHhII"  # 32-byte object record header
 

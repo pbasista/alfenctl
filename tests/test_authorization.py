@@ -107,7 +107,9 @@ def test_a_station_already_holding_the_undefined_pair_is_reported() -> None:
 
 def test_a_set_sends_exactly_one_batch() -> None:
     c = charger()
-    auth.apply(c, mode=auth.MODE_PLUG_AND_CHARGE, whitelist=False, max_outage_s=30)
+    auth.apply(
+        c, mode=auth.MODE_PLUG_AND_CHARGE, whitelist_enabled=False, max_outage_s=30
+    )
     assert len(c.writes) == 1
     assert set(c.writes[0]) == {
         auth.P_MODE,

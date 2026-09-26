@@ -491,7 +491,7 @@ def read_display(charger: AlfenCharger, model: str | None = None) -> DisplayInfo
         live = charger.fetch_properties_by_ids(
             [PROP_DISPLAY_PRESENT, PROP_LOGO_WIDTH, PROP_LOGO_HEIGHT]
         )
-    except Exception:  # a charger that will not answer has not said yes
+    except Exception:  # noqa: BLE001 - a charger that will not answer has not said yes
         live = []
     by_key = {lp.key: lp.value for lp in live}
     width = as_int(by_key.get(PROP_LOGO_WIDTH))

@@ -19,7 +19,7 @@ Choosing the image, checking it against the charger and asking the user to
 confirm all happen in front of this, in whichever front end is driving:
 :mod:`alfenctl.cli.commands.firmware` for the CLI, :mod:`alfenctl.web.api`
 for the browser.  Nothing here prints; progress goes to a
-:class:`~alfenctl.report.Reporter`, and a failure is raised.
+:class:`~devicectl.report.Reporter`, and a failure is raised.
 """
 
 from __future__ import annotations
@@ -29,12 +29,13 @@ import time
 from typing import Callable, Iterator
 
 import httpx
+from devicectl.progress import PROGRESS_TICK_S
+from devicectl.report import SILENT, Reporter, Wait
 
+from alfenctl import clock
 from alfenctl.charger import REBOOT_POLL_TIMEOUT_S, AlfenCharger
 from alfenctl.errors import AlfenError
 from alfenctl.firmware import FW_STATUS, FW_TERMINAL_ERR, FW_TERMINAL_OK
-from alfenctl.progress import PROGRESS_TICK_S
-from alfenctl.report import SILENT, Reporter, Wait
 
 # Seconds between /api/firmware polls while waiting for the install.
 DEFAULT_POLL_INTERVAL_S = 5.0
@@ -95,7 +96,7 @@ def send_image(
     will not take a second one.
     """
     report.step("Setting the charger clock")
-    charger.set_datetime(is_ahp=is_ahp)
+    clock.set(charger, is_ahp=is_ahp)
     in_progress, _ = charger.firmware_status()
     if in_progress:
         raise UploadInProgress("an upload is already in progress on this charger")

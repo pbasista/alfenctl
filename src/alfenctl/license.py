@@ -87,6 +87,12 @@ class LicenseInfo:
         order is the app's own (``GetFeatureTextLongList``) and so are the two
         exclusions -- a DC charger has no per-socket output to raise and an
         AHP has no modem, so neither is a feature those models are missing.
+
+        ``dc`` is never set by anything in alfenctl today:
+        :func:`alfenctl.firmware.device_family` answers only "AHP" or "NG",
+        and nothing else identifies a DC model.  The parameter stays because
+        the rule is the app's and is real; the caller that can tell does not
+        exist yet.
         """
         out: list[tuple[str, bool]] = []
         for bit, label in _FEATURE_LABELS:

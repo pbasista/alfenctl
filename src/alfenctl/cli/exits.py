@@ -6,23 +6,36 @@ everything else -- no station, no route to it, a value the charger refused.
 There is deliberately no code per failure kind; the message on stderr says
 which.
 
-The firmware upgrade is the exception.  It is the one command a script is
-likely to run unattended across a fleet, where "this image is wrong for
+Those three, and the two firmware weights that mean the same thing in every
+program of this shape, come from :mod:`devicectl.cli.exits`; they are
+re-exported here so a caller has one place to look rather than two.  The
+firmware upgrade adds two more of its own.  It is the one command a script
+is likely to run unattended across a fleet, where "this image is wrong for
 this charger" and "the charger never came back" call for different
-reactions, so it has four codes of its own.
+reactions.
 """
 
 from __future__ import annotations
 
-EXIT_OK = 0
-
-EXIT_ERROR = 1  # generic failure: station not found, comms error, invalid input
-
-EXIT_INTERRUPTED = 130  # Ctrl+C (128 + SIGINT), by shell convention
+from devicectl.cli.exits import (
+    EXIT_ERROR,
+    EXIT_INCOMPATIBLE,
+    EXIT_INTERRUPTED,
+    EXIT_OK,
+    EXIT_UPDATE_FAILED,
+)
 
 # --- alfenctl firmware ---------------------------------------------------------------------
 
-EXIT_INCOMPATIBLE = 2  # the image failed the compatibility checks
 EXIT_UPLOAD_IN_PROGRESS = 3  # another upload is already running on the charger
-EXIT_UPDATE_FAILED = 4  # upload sent, but the install reached no good state
 EXIT_NO_FIRMWARE = 5  # no image named and none could be offered from the server
+
+__all__ = [
+    "EXIT_ERROR",
+    "EXIT_INCOMPATIBLE",
+    "EXIT_INTERRUPTED",
+    "EXIT_NO_FIRMWARE",
+    "EXIT_OK",
+    "EXIT_UPDATE_FAILED",
+    "EXIT_UPLOAD_IN_PROGRESS",
+]

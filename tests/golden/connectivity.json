@@ -1,0 +1,273 @@
+{
+  "state": {
+    "wifi_enabled": true,
+    "wifi_ssid": "roof",
+    "wifi_security": 4194308,
+    "wifi_rssi": -61,
+    "wifi_status": 1,
+    "wifi_hardware": true,
+    "wifi_station_status": 1,
+    "wifi_ap_enabled": false,
+    "wifi_ap_start": false,
+    "wifi_ap_status": 0,
+    "wifi_address": "192.168.1.51",
+    "mac": "AA:BB:CC:DD:EE:FF",
+    "wired_address": "192.168.1.42",
+    "wired_fixed": true,
+    "wired": {
+      "netmask": "255.255.255.0",
+      "gateway": "192.168.1.1",
+      "dns1": "192.168.1.1",
+      "dns2": "9.9.9.9"
+    },
+    "mobile_address": "10.64.7.3",
+    "signal_strength": -75,
+    "imsi": "204080123456789",
+    "iccid": "8931080123456789012",
+    "apn": "internet",
+    "network_mode": 0,
+    "network_technology": 3
+  },
+  "rows": [
+    [
+      "Ethernet MAC",
+      "AA:BB:CC:DD:EE:FF"
+    ],
+    [
+      "Ethernet address",
+      "192.168.1.42 (static)"
+    ],
+    [
+      "Ethernet netmask",
+      "255.255.255.0"
+    ],
+    [
+      "Ethernet gateway",
+      "192.168.1.1"
+    ],
+    [
+      "Ethernet DNS",
+      "192.168.1.1"
+    ],
+    [
+      "Ethernet DNS 2",
+      "9.9.9.9"
+    ],
+    [
+      "Wi-Fi",
+      "enabled"
+    ],
+    [
+      "  radio",
+      "running"
+    ],
+    [
+      "  network",
+      "roof"
+    ],
+    [
+      "  security",
+      "WPA2 PSK (AES)"
+    ],
+    [
+      "  station",
+      "not configured"
+    ],
+    [
+      "  address",
+      "192.168.1.51"
+    ],
+    [
+      "  signal",
+      "-61 dBm"
+    ],
+    [
+      "  access point",
+      "not initialised"
+    ],
+    [
+      "Modem address",
+      "10.64.7.3"
+    ],
+    [
+      "  APN",
+      "internet"
+    ],
+    [
+      "  IMSI",
+      "204080123456789"
+    ],
+    [
+      "  ICCID",
+      "8931080123456789012"
+    ],
+    [
+      "  signal",
+      "-75 dBm"
+    ],
+    [
+      "  mode",
+      "automatic"
+    ],
+    [
+      "  technology",
+      "unknown (3)"
+    ]
+  ],
+  "json": {
+    "mac": "AA:BB:CC:DD:EE:FF",
+    "wiredAddress": "192.168.1.42",
+    "wiredFixed": true,
+    "wifiEnabled": true,
+    "wifiStatus": 1,
+    "wifiSsid": "roof",
+    "wifiSecurity": 4194308,
+    "wifiStationStatus": 1,
+    "wifiAddress": "192.168.1.51",
+    "wifiRssi": -61,
+    "wifiApStatus": 0,
+    "wifiApEnabled": false,
+    "mobileAddress": "10.64.7.3",
+    "apn": "internet",
+    "imsi": "204080123456789",
+    "iccid": "8931080123456789012",
+    "signalStrength": -75,
+    "networkMode": 0,
+    "networkTechnology": 3,
+    "hasWifi": true,
+    "scanObstacle": null,
+    "wired": {
+      "netmask": "255.255.255.0",
+      "gateway": "192.168.1.1",
+      "dns1": "192.168.1.1",
+      "dns2": "9.9.9.9"
+    },
+    "options": {
+      "wifiStatus": {
+        "0": "not initialised",
+        "1": "running",
+        "2": "disabled",
+        "3": "error"
+      },
+      "wifiSecurity": {
+        "0": "open",
+        "2097154": "WPA PSK (TKIP)",
+        "2097156": "WPA PSK (AES)",
+        "2097158": "WPA PSK (AES & TKIP)",
+        "4194306": "WPA2 PSK (TKIP)",
+        "4194308": "WPA2 PSK (AES)",
+        "4194310": "WPA2 PSK (AES & TKIP)",
+        "6291460": "WPA2/WPA PSK (AES)",
+        "6291462": "WPA2/WPA PSK (AES & TKIP)",
+        "16777220": "WPA3 PSK (AES)",
+        "20971524": "WPA3/WPA2 PSK (AES)"
+      },
+      "wifiStationStatus": {
+        "0": "not initialised",
+        "1": "not configured",
+        "2": "not connected",
+        "3": "connected"
+      },
+      "wifiApStatus": {
+        "0": "not initialised",
+        "1": "disabled",
+        "2": "enabled"
+      },
+      "networkMode": {
+        "0": "automatic",
+        "1": "manual"
+      },
+      "networkTechnology": {
+        "0": "2G",
+        "1": "3G",
+        "2": "4G"
+      }
+    },
+    "rows": [
+      {
+        "label": "Ethernet MAC",
+        "value": "AA:BB:CC:DD:EE:FF"
+      },
+      {
+        "label": "Ethernet address",
+        "value": "192.168.1.42 (static)"
+      },
+      {
+        "label": "Ethernet netmask",
+        "value": "255.255.255.0"
+      },
+      {
+        "label": "Ethernet gateway",
+        "value": "192.168.1.1"
+      },
+      {
+        "label": "Ethernet DNS",
+        "value": "192.168.1.1"
+      },
+      {
+        "label": "Ethernet DNS 2",
+        "value": "9.9.9.9"
+      },
+      {
+        "label": "Wi-Fi",
+        "value": "enabled"
+      },
+      {
+        "label": "  radio",
+        "value": "running"
+      },
+      {
+        "label": "  network",
+        "value": "roof"
+      },
+      {
+        "label": "  security",
+        "value": "WPA2 PSK (AES)"
+      },
+      {
+        "label": "  station",
+        "value": "not configured"
+      },
+      {
+        "label": "  address",
+        "value": "192.168.1.51"
+      },
+      {
+        "label": "  signal",
+        "value": "-61 dBm"
+      },
+      {
+        "label": "  access point",
+        "value": "not initialised"
+      },
+      {
+        "label": "Modem address",
+        "value": "10.64.7.3"
+      },
+      {
+        "label": "  APN",
+        "value": "internet"
+      },
+      {
+        "label": "  IMSI",
+        "value": "204080123456789"
+      },
+      {
+        "label": "  ICCID",
+        "value": "8931080123456789012"
+      },
+      {
+        "label": "  signal",
+        "value": "-75 dBm"
+      },
+      {
+        "label": "  mode",
+        "value": "automatic"
+      },
+      {
+        "label": "  technology",
+        "value": "unknown (3)"
+      }
+    ]
+  }
+}

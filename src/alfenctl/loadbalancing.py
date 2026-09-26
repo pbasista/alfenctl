@@ -39,6 +39,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from devicectl import fields
+from devicectl.fields import FieldSpec
+
 from alfenctl.charger import AlfenCharger, LiveProperty
 from alfenctl.eds import INTEGER8, REAL32, UNSIGNED16, UNSIGNED32, VISIBLE_STRING
 from alfenctl.errors import AlfenError
@@ -62,26 +65,6 @@ P_SOLAR_MODE = (0x3280, 1)  # 12928 sub 1, off/comfort/green
 P_SOLAR_GREEN_SHARE = (0x3280, 2)  # sub 2, percent
 P_SOLAR_COMFORT_LEVEL = (0x3280, 3)  # sub 3, watts
 SOLAR_BOOST = {1: (0x3280, 4), 2: (0x3280, 5)}  # subs 4 and 5, one per socket
-
-ALL_KEYS = (
-    P_MODE,
-    P_MAX_METER_CURRENT,
-    P_SAFE_CURRENT,
-    P_PHASE_ROTATION,
-    P_MEASUREMENT_INCLUDES_EV,
-    P_MAX_IMBALANCE,
-    P_PHASE_SWITCHING,
-    P_MAX_ALLOWED_PHASES,
-    P_DATA_SOURCE,
-    P_PROTOCOL,
-    P_P1_INTERFACE,
-    P_P1_ADDRESS,
-    P_P1_PORT,
-    P_SOLAR_MODE,
-    P_SOLAR_GREEN_SHARE,
-    P_SOLAR_COMFORT_LEVEL,
-    *SOLAR_BOOST.values(),
-)
 
 # ELoadBalancingMode, as two bits (the app's two checkboxes).
 STATIC_BIT = 0x1
@@ -133,7 +116,251 @@ MIN_COMFORT_W, MAX_COMFORT_W = 1350, 11000
 ALLOWED_PHASES = (1, 3)
 
 
-class LoadBalancingError(AlfenError, ValueError):
+def _mode_row(_value: Any, state: LoadBalancing) -> str:
+    """Render the two mode bits the way the app's two checkboxes read together."""
+    return state.mode_label
+
+
+def _p1_row(value: Any, state: LoadBalancing) -> str | None:
+    """Render the P1 interface with the server it points at, when there is one."""
+    if value is None:
+        return None
+    where = P1_INTERFACES.get(int(value), f"unknown ({value})")
+    if state.p1_address:
+        where += f" ({state.p1_address}:{state.p1_port})"
+    return where
+
+
+# --- the settings ------------------------------------------------------------------------
+# One row per setting, in the order the terminal prints them, and the single
+# place any of the five audiences is told about a field: :func:`read` decodes
+# by walking it, :meth:`LoadBalancing.rows` prints by walking it,
+# ``web.schema`` serialises by walking it, ``cli.commands.loadbalancing`` adds
+# its flags by walking it, and :func:`apply` writes by walking it.
+#
+# Three of them are not in the table's own shape.  The mode is a bit field, so
+# it is read here and written through ``static``/``active``, which have no
+# register of their own; the P1 server's address and port are read-only and
+# print inside the interface's row rather than beside it; and the solar boost
+# is one register per socket, which is a dict, not a field.
+FIELDS: tuple[FieldSpec, ...] = (
+    FieldSpec(
+        name="mode_raw",
+        kind=fields.INTEGER,
+        address=P_MODE,
+        label="Mode",
+        json="modeRaw",
+        access=fields.READ_ONLY,
+        render=_mode_row,
+    ),
+    FieldSpec(
+        name="static",
+        kind=fields.FLAG,
+        json="static",
+        flag="--static",
+        help="static load balancing",
+    ),
+    FieldSpec(
+        name="active",
+        kind=fields.FLAG,
+        json="active",
+        flag="--active",
+        help="active load balancing",
+    ),
+    FieldSpec(
+        name="protocol",
+        kind=fields.ENUM,
+        address=P_PROTOCOL,
+        wire=INTEGER8,
+        label="Meter protocol",
+        json="protocol",
+        flag="--protocol",
+        options=PROTOCOLS,
+        what="the meter protocol",
+        help="smart meter protocol",
+    ),
+    FieldSpec(
+        name="data_source",
+        kind=fields.ENUM,
+        address=P_DATA_SOURCE,
+        wire=INTEGER8,
+        label="Data source",
+        json="dataSource",
+        flag="--data-source",
+        options=DATA_SOURCES,
+        what="the data source",
+        help="what active balancing follows",
+    ),
+    FieldSpec(
+        name="max_meter_current_a",
+        kind=fields.NUMBER,
+        address=P_MAX_METER_CURRENT,
+        wire=REAL32,
+        label="Max meter current",
+        json="maxMeterCurrentA",
+        flag="--max-meter-current",
+        unit="A",
+        minimum=MIN_METER_CURRENT_A,
+        maximum=MAX_METER_CURRENT_A,
+        metavar="AMPS",
+        what="the maximum meter current",
+        help="the grid connection's limit",
+    ),
+    FieldSpec(
+        name="safe_current_a",
+        kind=fields.NUMBER,
+        address=P_SAFE_CURRENT,
+        wire=REAL32,
+        label="Safe current",
+        json="safeCurrentA",
+        flag="--safe-current",
+        unit="A",
+        minimum=MIN_SAFE_CURRENT_A,
+        maximum=MAX_SAFE_CURRENT_A,
+        metavar="AMPS",
+        what="the safe current",
+        help="what to fall back to when the meter stops answering",
+    ),
+    FieldSpec(
+        name="max_imbalance_a",
+        kind=fields.NUMBER,
+        address=P_MAX_IMBALANCE,
+        wire=REAL32,
+        label="Max imbalance",
+        json="maxImbalanceA",
+        flag="--max-imbalance",
+        unit="A",
+        minimum=0.0,
+        maximum=MAX_METER_CURRENT_A,
+        metavar="AMPS",
+        what="the maximum imbalance",
+        help="allowed imbalance between phases",
+    ),
+    FieldSpec(
+        name="measurement_includes_ev",
+        kind=fields.ENUM,
+        address=P_MEASUREMENT_INCLUDES_EV,
+        wire=INTEGER8,
+        label="Measurement",
+        json="measurementIncludesEv",
+        flag="--includes-ev",
+        options=MEASUREMENT_SOURCES,
+        aliases=fields.ON_OFF_CODES,
+        what="the measurement source",
+        help="whether the meter's reading already counts the charging car",
+    ),
+    FieldSpec(
+        name="phase_rotation",
+        kind=fields.TEXT,
+        address=P_PHASE_ROTATION,
+        wire=VISIBLE_STRING,
+        label="Phase rotation",
+        json="phaseRotation",
+        flag="--phase-rotation",
+        options=PHASE_ROTATIONS,
+        what="the phase rotation",
+        help="how the phases are wired to this station",
+    ),
+    FieldSpec(
+        name="max_allowed_phases",
+        kind=fields.INTEGER,
+        address=P_MAX_ALLOWED_PHASES,
+        wire=UNSIGNED32,
+        label="Max allowed phases",
+        json="maxAllowedPhases",
+        flag="--max-phases",
+        options=ALLOWED_PHASES,
+        what="the maximum allowed phases",
+        help="the most phases a session may use",
+    ),
+    FieldSpec(
+        name="phase_switching",
+        kind=fields.FLAG,
+        address=P_PHASE_SWITCHING,
+        wire=INTEGER8,
+        label="Phase switching",
+        json="phaseSwitching",
+        flag="--phase-switching",
+        words=("on", "off"),
+        help="allow 1-/3-phase switching",
+    ),
+    FieldSpec(
+        name="p1_interface",
+        kind=fields.ENUM,
+        address=P_P1_INTERFACE,
+        label="P1 interface",
+        json="p1Interface",
+        options=P1_INTERFACES,
+        access=fields.READ_ONLY,
+        render=_p1_row,
+    ),
+    FieldSpec(
+        name="p1_address",
+        kind=fields.TEXT,
+        address=P_P1_ADDRESS,
+        json="p1Address",
+        access=fields.READ_ONLY,
+    ),
+    FieldSpec(
+        name="p1_port",
+        kind=fields.INTEGER,
+        address=P_P1_PORT,
+        json="p1Port",
+        access=fields.READ_ONLY,
+    ),
+    FieldSpec(
+        name="solar_mode",
+        kind=fields.ENUM,
+        address=P_SOLAR_MODE,
+        wire=INTEGER8,
+        label="Solar charging",
+        json="solarMode",
+        flag="--solar-mode",
+        options=SOLAR_MODES,
+        what="the solar mode",
+        help="solar charging",
+    ),
+    FieldSpec(
+        name="solar_green_share",
+        kind=fields.INTEGER,
+        address=P_SOLAR_GREEN_SHARE,
+        wire=UNSIGNED16,
+        label="  green share",
+        json="solarGreenShare",
+        flag="--green-share",
+        unit="%",
+        minimum=MIN_GREEN_SHARE,
+        maximum=MAX_GREEN_SHARE,
+        metavar="PERCENT",
+        what="the green share",
+        help="surplus share to charge from",
+    ),
+    FieldSpec(
+        name="solar_comfort_w",
+        kind=fields.INTEGER,
+        address=P_SOLAR_COMFORT_LEVEL,
+        wire=UNSIGNED32,
+        label="  comfort level",
+        json="solarComfortW",
+        flag="--comfort-level",
+        unit="W",
+        minimum=MIN_COMFORT_W,
+        maximum=MAX_COMFORT_W,
+        metavar="WATTS",
+        what="the comfort level",
+        help="the floor comfort mode keeps",
+    ),
+)
+
+# Every register one round trip has to ask for: the table's, plus the two
+# per-socket boost flags that are a dict rather than a field.
+ALL_KEYS = (
+    *(spec.address for spec in FIELDS if spec.address is not None),
+    *SOLAR_BOOST.values(),
+)
+
+
+class LoadBalancingError(AlfenError, fields.FieldError):
     """A load-balancing setting the charger could not sensibly be given."""
 
 
@@ -199,79 +426,10 @@ class LoadBalancing:
 
     def rows(self) -> list[tuple[str, str]]:
         """Return the label/value pairs worth printing, skipping what is absent."""
-        out: list[tuple[str, str]] = [("Mode", self.mode_label)]
-        if self.protocol is not None:
-            out.append(("Meter protocol", _label(PROTOCOLS, self.protocol)))
-        if self.data_source is not None:
-            out.append(("Data source", _label(DATA_SOURCES, self.data_source)))
-        for label, amps in (
-            ("Max meter current", self.max_meter_current_a),
-            ("Safe current", self.safe_current_a),
-            ("Max imbalance", self.max_imbalance_a),
-        ):
-            if amps is not None:
-                out.append((label, f"{amps:g} A"))
-        if self.measurement_includes_ev is not None:
-            out.append(
-                (
-                    "Measurement",
-                    _label(MEASUREMENT_SOURCES, self.measurement_includes_ev),
-                )
-            )
-        if self.phase_rotation:
-            out.append(("Phase rotation", self.phase_rotation))
-        if self.max_allowed_phases is not None:
-            out.append(("Max allowed phases", str(self.max_allowed_phases)))
-        if self.phase_switching is not None:
-            out.append(("Phase switching", "on" if self.phase_switching else "off"))
-        if self.p1_interface is not None:
-            where = _label(P1_INTERFACES, self.p1_interface)
-            if self.p1_address:
-                where += f" ({self.p1_address}:{self.p1_port})"
-            out.append(("P1 interface", where))
-        if self.solar_mode is not None:
-            out.append(("Solar charging", _label(SOLAR_MODES, self.solar_mode)))
-            if self.solar_green_share is not None:
-                out.append(("  green share", f"{self.solar_green_share}%"))
-            if self.solar_comfort_w is not None:
-                out.append(("  comfort level", f"{self.solar_comfort_w} W"))
+        out = fields.rows(FIELDS, self)
         for number, on in sorted(self.solar_boost.items()):
             out.append((f"  boost socket {number}", "on" if on else "off"))
         return out
-
-
-def _label(table: dict[int, str], code: int) -> str:
-    """Look up a code, keeping the raw number when the table lacks it."""
-    return table.get(code, f"unknown ({code})")
-
-
-def _number(
-    live: dict[tuple[int, int], LiveProperty], key: tuple[int, int]
-) -> float | None:
-    """Read a property as a float, or None when absent or not numeric."""
-    prop = live.get(key)
-    if prop is None or prop.value is None:
-        return None
-    try:
-        return float(prop.value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _int(live: dict[tuple[int, int], LiveProperty], key: tuple[int, int]) -> int | None:
-    """Read a property as an integer, or None when absent or not numeric."""
-    value = _number(live, key)
-    return None if value is None else int(value)
-
-
-def _text(
-    live: dict[tuple[int, int], LiveProperty], key: tuple[int, int]
-) -> str | None:
-    """Read a property as a non-empty string, or None."""
-    prop = live.get(key)
-    if prop is None or prop.value in (None, ""):
-        return None
-    return str(prop.value)
 
 
 def read(charger: AlfenCharger) -> LoadBalancing:
@@ -289,31 +447,19 @@ def read(charger: AlfenCharger) -> LoadBalancing:
         read_license,
     )
 
-    live = {lp.key: lp for lp in charger.fetch_properties_by_ids(list(ALL_KEYS))}
-    state = LoadBalancing(
-        mode_raw=_int(live, P_MODE),
-        max_meter_current_a=_number(live, P_MAX_METER_CURRENT),
-        safe_current_a=_number(live, P_SAFE_CURRENT),
-        phase_rotation=_text(live, P_PHASE_ROTATION),
-        measurement_includes_ev=_int(live, P_MEASUREMENT_INCLUDES_EV),
-        max_imbalance_a=_number(live, P_MAX_IMBALANCE),
-        max_allowed_phases=_int(live, P_MAX_ALLOWED_PHASES),
-        data_source=_int(live, P_DATA_SOURCE),
-        protocol=_int(live, P_PROTOCOL),
-        p1_interface=_int(live, P_P1_INTERFACE),
-        p1_address=_text(live, P_P1_ADDRESS),
-        p1_port=_int(live, P_P1_PORT),
-        solar_mode=_int(live, P_SOLAR_MODE),
-        solar_green_share=_int(live, P_SOLAR_GREEN_SHARE),
-        solar_comfort_w=_int(live, P_SOLAR_COMFORT_LEVEL),
-    )
-    switching = _int(live, P_PHASE_SWITCHING)
-    if switching is not None:
-        state.phase_switching = bool(switching)
+    live: dict[tuple[int, int], LiveProperty] = {
+        lp.key: lp for lp in charger.fetch_properties_by_ids(list(ALL_KEYS))
+    }
+
+    def answer(key: tuple[int, int]) -> Any:
+        prop = live.get(key)
+        return None if prop is None else prop.value
+
+    state = LoadBalancing(**fields.harvest(FIELDS, answer))
     for number, key in SOLAR_BOOST.items():
-        boost = _int(live, key)
+        boost = answer(key)
         if boost is not None:
-            state.solar_boost[number] = bool(boost)
+            state.solar_boost[number] = bool(int(float(boost)))
     # Which of the three balancing features this station may actually use.
     # feature_unlocked, not a plain bit test: firmware below the licensing
     # floor has every feature and reports no bitmask at all, and calling that
@@ -343,31 +489,31 @@ def check_current(amps: float, what: str, low: float, high: float) -> float:
 
 def apply(
     charger: AlfenCharger,
+    settings: dict[str, Any] | None = None,
     *,
-    static: bool | None = None,
-    active: bool | None = None,
-    protocol: int | None = None,
-    data_source: int | None = None,
-    max_meter_current_a: float | None = None,
-    safe_current_a: float | None = None,
-    max_imbalance_a: float | None = None,
-    phase_rotation: str | None = None,
-    measurement_includes_ev: bool | None = None,
-    phase_switching: bool | None = None,
-    max_allowed_phases: int | None = None,
-    solar_mode: int | None = None,
-    solar_green_share: int | None = None,
-    solar_comfort_w: int | None = None,
-    solar_boost: dict[int, bool] | None = None,
     state: LoadBalancing | None = None,
+    **named: Any,
 ) -> LoadBalancing:
     """Write the settings that were named, and return the charger's new state.
 
-    ``static`` and ``active`` share one register, so turning either on or off
-    is a read-modify-write of the other's bit -- ``state`` is the reading the
-    caller already has, and is re-read when it was not supplied.
+    Settings arrive either as a mapping -- which is what a command line and a
+    request body turn into, neither of them having to name the fields a second
+    time -- or as keywords, which is how the rest of this program calls it.
+
+    Three of them are not plain field writes.  ``static`` and ``active`` share
+    one register, so setting either is a read-modify-write of the other's bit;
+    ``state`` is the reading the caller already has, and is taken fresh when it
+    was not supplied.  ``solar_boost`` maps a socket number to a flag.
     """
-    writes: dict[tuple[int, int], tuple[Any, int | None]] = {}
+    given = {**(settings or {}), **named}
+    boost = given.pop("solar_boost", None)
+    try:
+        checked = fields.values(FIELDS, given)
+        static = checked.pop("static", None)
+        active = checked.pop("active", None)
+        writes = fields.writes(FIELDS, checked)
+    except fields.FieldError as exc:
+        raise LoadBalancingError(str(exc)) from None
     if static is not None or active is not None:
         if state is None:
             state = read(charger)
@@ -376,83 +522,11 @@ def apply(
             if flag is not None:
                 raw = (raw | bit) if flag else (raw & ~bit)
         writes[P_MODE] = (raw, INTEGER8)
-    if protocol is not None:
-        if protocol not in PROTOCOLS:
-            raise LoadBalancingError(
-                f"unknown meter protocol {protocol}; "
-                + ", ".join(f"{v} ({n})" for v, n in sorted(PROTOCOLS.items()))
-            )
-        writes[P_PROTOCOL] = (protocol, INTEGER8)
-    if data_source is not None:
-        if data_source not in DATA_SOURCES:
-            raise LoadBalancingError(f"unknown data source {data_source}")
-        writes[P_DATA_SOURCE] = (data_source, INTEGER8)
-    if max_meter_current_a is not None:
-        writes[P_MAX_METER_CURRENT] = (
-            check_current(
-                max_meter_current_a,
-                "the maximum meter current",
-                MIN_METER_CURRENT_A,
-                MAX_METER_CURRENT_A,
-            ),
-            REAL32,
-        )
-    if safe_current_a is not None:
-        writes[P_SAFE_CURRENT] = (
-            check_current(
-                safe_current_a,
-                "the safe current",
-                MIN_SAFE_CURRENT_A,
-                MAX_SAFE_CURRENT_A,
-            ),
-            REAL32,
-        )
-    if max_imbalance_a is not None:
-        writes[P_MAX_IMBALANCE] = (
-            check_current(
-                max_imbalance_a, "the maximum imbalance", 0.0, MAX_METER_CURRENT_A
-            ),
-            REAL32,
-        )
-    if phase_rotation is not None:
-        if phase_rotation not in PHASE_ROTATIONS:
-            raise LoadBalancingError(
-                f"unknown phase rotation {phase_rotation!r}; one of "
-                + ", ".join(PHASE_ROTATIONS)
-            )
-        writes[P_PHASE_ROTATION] = (phase_rotation, VISIBLE_STRING)
-    if measurement_includes_ev is not None:
-        writes[P_MEASUREMENT_INCLUDES_EV] = (int(measurement_includes_ev), INTEGER8)
-    if phase_switching is not None:
-        writes[P_PHASE_SWITCHING] = (int(phase_switching), INTEGER8)
-    if max_allowed_phases is not None:
-        if max_allowed_phases not in ALLOWED_PHASES:
-            raise LoadBalancingError("the maximum allowed phases is 1 or 3")
-        writes[P_MAX_ALLOWED_PHASES] = (max_allowed_phases, UNSIGNED32)
-    if solar_mode is not None:
-        if solar_mode not in SOLAR_MODES:
-            raise LoadBalancingError(
-                "the solar mode is off, comfort or green (0, 1 or 2)"
-            )
-        writes[P_SOLAR_MODE] = (solar_mode, INTEGER8)
-    if solar_green_share is not None:
-        if not MIN_GREEN_SHARE <= solar_green_share <= MAX_GREEN_SHARE:
-            raise LoadBalancingError(
-                f"the green share is a percentage ({MIN_GREEN_SHARE}-{MAX_GREEN_SHARE})"
-            )
-        writes[P_SOLAR_GREEN_SHARE] = (solar_green_share, UNSIGNED16)
-    if solar_comfort_w is not None:
-        if not MIN_COMFORT_W <= solar_comfort_w <= MAX_COMFORT_W:
-            raise LoadBalancingError(
-                f"the comfort level must be between {MIN_COMFORT_W} and "
-                f"{MAX_COMFORT_W} W"
-            )
-        writes[P_SOLAR_COMFORT_LEVEL] = (solar_comfort_w, UNSIGNED32)
-    for number, on in (solar_boost or {}).items():
-        key = SOLAR_BOOST.get(number)
+    for number, on in (boost or {}).items():
+        key = SOLAR_BOOST.get(int(number))
         if key is None:
             raise LoadBalancingError(f"there is no socket {number} on an Alfen station")
-        writes[key] = (int(on), INTEGER8)
+        writes[key] = (int(bool(on)), INTEGER8)
     if writes:
         charger.write_properties(writes)
     return read(charger)
@@ -461,6 +535,7 @@ def apply(
 __all__ = [
     "ALL_KEYS",
     "DATA_SOURCES",
+    "FIELDS",
     "LoadBalancing",
     "LoadBalancingError",
     "PHASE_ROTATIONS",

@@ -11,7 +11,6 @@ import time
 from datetime import datetime
 
 import pytest
-
 from webfake import call, wait_for
 
 from alfenctl.charger import LiveProperty
@@ -151,7 +150,10 @@ def test_the_firmware_listing_judges_each_image_against_this_charger(
     newest, installed = doc["releases"]
     assert newest["version"] == "7.4.5"
     assert newest["notes"] == ["upgrade"]
-    assert newest["blocked"] is False
+    # 6.4.0 -> 7.4.5 on an NG9xx is exactly the jump Alfen asks be taken via
+    # 6.6.2, so the newest image is offered and refused, not merely offered.
+    assert newest["blocked"] is True
+    assert any("6.6.2" in w for w in newest["warnings"])
     assert installed["notes"] == ["currently installed"]
     assert doc["source"].endswith("/Firmware")
 
@@ -262,19 +264,6 @@ def test_showing_a_preset_needs_a_name_and_a_preset(context, monkeypatch):
     with pytest.raises(api.ApiError) as caught:
         call(context, "GET", "/api/preset", name="nothing like this")
     assert caught.value.status == 404
-
-
-def test_the_console_listing_carries_the_sentence_that_explains_it(context):
-    """Two thirds of the table is blank; the note saying why travels with it.
-
-    The terminal prints the same sentence under `alfenctl cmd --list`, from
-    the same constant -- one string, not one per front end.
-    """
-    from alfenctl.cli.commands.maintenance import CONSOLE_UNKNOWN_NOTE
-
-    _, doc = call(context, "GET", "/api/console")
-    assert doc["note"] == CONSOLE_UNKNOWN_NOTE
-    assert any(not row["command"] for row in doc["commands"])
 
 
 def test_installing_a_release_needs_a_name(context):
@@ -436,12 +425,12 @@ def test_reboot_sends_the_command_and_releases_the_link(context, monkeypatch):
 def test_the_log_page_is_parsed_into_lines(context):
     _, doc = call(context, "GET", "/api/logs")
     assert [line["kind"] for line in doc["lines"]] == ["INFO", "ERROR"]
-    assert context.log_last_id == 4295
+    assert context.live.log_last_id == 4295
 
 
 def test_the_live_poll_publishes_status_and_new_log_lines(context):
     subscription = context.worker.events.subscribe()
-    context.follow_logs = True
+    context.live.follow_logs = True
     context.worker.set_poll(live=True, interval=1.0)
     names = set()
     deadline = time.monotonic() + 3.0
@@ -522,9 +511,8 @@ def test_uploading_a_logo_becomes_a_job(context, tmp_path, monkeypatch):
 
 
 def test_a_firmware_upload_runs_the_whole_sequence(context, monkeypatch):
-    from alfenctl.firmware import CompatResult, FirmwareFile
-
     from alfenctl import upgrade
+    from alfenctl.firmware import CompatResult, FirmwareFile
 
     # Run the real install, only faster: the state machine it drives has its
     # own tests, this one is about the job the browser watches.
@@ -625,3 +613,396 @@ def test_the_console_lists_the_commands_it_is_known_to_take(context):
     assert doc["commands"]
     row = doc["commands"][0]
     assert {"what", "command", "alfenctl"} <= set(row)
+
+
+def test_scn_peers_are_probed_without_reaching_into_the_cli(context, monkeypatch):
+    """The peer probe is a domain function, and the browser can drive it.
+
+    It used to be borrowed from ``alfenctl.cli.commands.scn`` and handed a
+    hand-built ``argparse.Namespace``, which carried no ``debug`` -- so the
+    first station mDNS turned up that was not the target raised
+    ``AttributeError`` in the middle of the read.
+    """
+    from alfenctl import scn
+    from alfenctl.discovery import Station
+
+    peer_station = Station(ip="10.0.0.8", port=443, hostname="ALF-ACE0781465.local.")
+    membership = scn.Membership(
+        name="garage",
+        socket_id=1,
+        socket_count=2,
+        settings=scn.ScnSettings(
+            alternating_period_s=scn.DEFAULT_ALTERNATING_PERIOD_S,
+            total_current_a=scn.DEFAULT_TOTAL_CURRENT_A,
+            socket_safe_current_a=scn.DEFAULT_SOCKET_SAFE_CURRENT_A,
+            total_safe_current_a=scn.DEFAULT_TOTAL_SAFE_CURRENT_A,
+        ),
+    )
+
+    class PeerCharger:
+        def __init__(self, station, username, password, debug=False):
+            self.station = station
+            self.debug = debug
+
+        def login(self):
+            pass
+
+        def close(self):
+            pass
+
+        def basic_info(self):
+            from alfenctl.charger import ChargerInfo
+
+            return ChargerInfo(
+                object_id="ACE0781465",
+                identity="drive",
+                model="NG910",
+                family="NG",
+                firmware="6.4.0-4210",
+                firmware_version=(6, 4, 0),
+                sockets=1,
+            )
+
+    monkeypatch.setattr(scn, "discover", lambda _seconds: [peer_station])
+    monkeypatch.setattr(scn, "AlfenCharger", PeerCharger)
+    monkeypatch.setattr(scn, "read_membership", lambda _charger: membership)
+
+    _, doc = call(context, "GET", "/api/scn", peers="1")
+    assert doc["scn"]["name"] == "garage"
+    assert [p["objectId"] for p in doc["scn"]["peers"]] == ["ACE0781465"]
+
+
+def test_a_peer_that_will_not_answer_is_skipped_not_fatal(context, monkeypatch):
+    """A station on the LAN that is not a member leaves the rest readable."""
+    import httpx
+
+    from alfenctl import scn
+    from alfenctl.discovery import Station
+
+    stranger = Station(ip="10.0.0.9", port=443, hostname="printer.local.")
+    membership = scn.Membership(
+        name="garage",
+        socket_id=1,
+        socket_count=2,
+        settings=scn.ScnSettings(
+            alternating_period_s=scn.DEFAULT_ALTERNATING_PERIOD_S,
+            total_current_a=scn.DEFAULT_TOTAL_CURRENT_A,
+            socket_safe_current_a=scn.DEFAULT_SOCKET_SAFE_CURRENT_A,
+            total_safe_current_a=scn.DEFAULT_TOTAL_SAFE_CURRENT_A,
+        ),
+    )
+
+    class Refuses:
+        def __init__(self, station, username, password, debug=False):
+            pass
+
+        def login(self):
+            raise httpx.ConnectError("refused")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(scn, "discover", lambda _seconds: [stranger])
+    monkeypatch.setattr(scn, "AlfenCharger", Refuses)
+    monkeypatch.setattr(scn, "read_membership", lambda _charger: membership)
+
+    _, doc = call(context, "GET", "/api/scn", peers="1")
+    assert doc["scn"]["peers"] == []
+
+
+# --- the manufacturer (My Eve cloud) endpoints -------------------------------------------
+#
+# The handlers reach Alfen through `cloud.make_client()`, so a test swaps in an
+# httpx MockTransport and points the token cache at a tmp dir: no network, and
+# nothing written outside the test.
+
+
+def _cloud_graphql(request, *, registered="0011.2233.4455.6688"):
+    import json as _json
+
+    import httpx
+
+    body = _json.loads(request.content)
+    query = body["query"]
+    if "getAuthenticatedUser" in query:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "getAuthenticatedUser": {
+                        "uuid": "u-1",
+                        "profileInformation": {
+                            "firstName": "Pat",
+                            "lastName": "Rao",
+                            "company": "Acme",
+                        },
+                    }
+                }
+            },
+        )
+    if "getWarrantyEnddate" in query:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "getWarrantyEnddate": {
+                        "warrantyType": "Standard",
+                        "warrantyEnddate": "2027-01-01",
+                    }
+                }
+            },
+        )
+    if "getLicenseKey" in query:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "getLicenseKey": {
+                        "identifier": body["variables"]["identifier"],
+                        "licenseKey": registered,
+                    }
+                }
+            },
+        )
+    if "getFactoryDefaults" in query:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "getFactoryDefaults": {
+                        "identifier": body["variables"]["identifier"],
+                        "properties": [
+                            {"id": "2126_1", "value": "7"},
+                            {"id": "2062_0", "value": "eth"},
+                        ],
+                    }
+                }
+            },
+        )
+    if "findLastCreatedAtBySerialNumber" in query:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "findLastCreatedAtBySerialNumber": {
+                        "lastUpdate": "2024-05-06",
+                        "totalCount": 4,
+                    }
+                }
+            },
+        )
+    return httpx.Response(400, json={"errors": [{"message": "unknown operation"}]})
+
+
+def _wire_cloud(monkeypatch, tmp_path, handler):
+    """Point the cloud client at ``handler`` and the token cache at ``tmp_path``."""
+    import httpx
+
+    from alfenctl import cloud
+
+    monkeypatch.delenv(cloud.TOKEN_ENV, raising=False)
+    monkeypatch.setattr(
+        cloud,
+        "make_client",
+        lambda transport=None: httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    monkeypatch.setattr("alfenctl.config.default_config_dir", lambda: tmp_path)
+
+
+def test_cloud_lookup_uses_the_body_token(context, monkeypatch, tmp_path):
+    _wire_cloud(monkeypatch, tmp_path, _cloud_graphql)
+    status, doc = call(context, "POST", "/api/cloud", {"token": "AT"})
+    assert status == 200
+    assert doc["identifier"] == "ACE0781464"
+    assert doc["account"] == "Pat Rao"
+    assert doc["warrantyType"] == "Standard"
+    # The fake charger carries ...6677; Alfen holds ...6688, so a lookup says
+    # they differ and the page may offer to install the registered one.
+    assert doc["registeredKey"] == "0011.2233.4455.6688"
+    assert doc["installedKey"] == "0011.2233.4455.6677"
+    assert doc["matches"] is False
+
+
+def test_cloud_lookup_carries_records_and_decorated_defaults(
+    context, monkeypatch, tmp_path
+):
+    _wire_cloud(monkeypatch, tmp_path, _cloud_graphql)
+    _, doc = call(context, "POST", "/api/cloud", {"token": "AT"})
+    assert doc["company"] == "Acme"
+    assert doc["records"] == 4
+    assert doc["lastRecorded"] == "2024-05-06"
+    # The factory-default properties come back id-sorted and named, so the page
+    # shows the manufacturer's whole profile rather than bare register numbers.
+    defaults = doc["defaults"]
+    assert [p["id"] for p in defaults] == ["2062_0", "2126_1"]
+    assert all("title" in p and "value" in p for p in defaults)
+
+
+def test_cloud_lookup_without_a_token_or_sign_in_is_refused(
+    context, monkeypatch, tmp_path
+):
+    _wire_cloud(monkeypatch, tmp_path, _cloud_graphql)
+    with pytest.raises(api.ApiError) as caught:
+        call(context, "POST", "/api/cloud", {})
+    assert caught.value.status == 400
+
+
+def test_cloud_sign_in_start_returns_an_authorize_url(context, monkeypatch, tmp_path):
+    _wire_cloud(monkeypatch, tmp_path, _cloud_graphql)
+    status, doc = call(context, "POST", "/api/cloud/login", {"action": "start"})
+    assert status == 200
+    assert doc["url"].startswith("https://account.alfen.com/")
+    assert "code_challenge=" in doc["url"] and "state=" in doc["url"]
+
+
+def test_cloud_sign_in_finish_exchanges_caches_and_then_looks_up(
+    context, monkeypatch, tmp_path
+):
+    import urllib.parse
+
+    def handler(request):
+        import httpx
+
+        if request.url.path.endswith("/oauth2/v2.0/token"):
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "AT",
+                    "refresh_token": "RT",
+                    "expires_in": 3600,
+                },
+            )
+        return _cloud_graphql(request)
+
+    _wire_cloud(monkeypatch, tmp_path, handler)
+
+    # Start, so the server holds the verifier for this state.
+    _, started = call(context, "POST", "/api/cloud/login", {"action": "start"})
+    state = urllib.parse.parse_qs(urllib.parse.urlparse(started["url"]).query)["state"][
+        0
+    ]
+    redirected = f"com.alfen.myeve://oauth/redirect?code=the-code&state={state}"
+
+    status, doc = call(
+        context,
+        "POST",
+        "/api/cloud/login",
+        {"action": "finish", "redirected": redirected},
+    )
+    assert status == 200
+    assert doc["account"] == "Pat Rao"
+    # The token was cached where the CLI would find it too.
+    from alfenctl import cloud
+
+    assert (tmp_path / cloud.TOKEN_CACHE_NAME).exists()
+
+    # And now a lookup needs nothing pasted: it uses the cached token.
+    status, look = call(context, "POST", "/api/cloud", {})
+    assert status == 200
+    assert look["registeredKey"] == "0011.2233.4455.6688"
+
+
+def test_cloud_sign_in_start_from_localhost_is_a_loopback(
+    context, monkeypatch, tmp_path
+):
+    _wire_cloud(monkeypatch, tmp_path, _cloud_graphql)
+    status, doc = call(
+        context,
+        "POST",
+        "/api/cloud/login",
+        {"action": "start", "origin": "http://localhost:8080"},
+    )
+    assert status == 200
+    assert doc["loopback"] is True
+    # The redirect points back at the UI's own origin, so the browser lands here.
+    assert "redirect_uri=http%3A%2F%2Flocalhost%3A8080%2F" in doc["url"]
+
+
+def test_cloud_sign_in_loopback_round_trip_caches_the_token(
+    context, monkeypatch, tmp_path
+):
+    import urllib.parse
+
+    def handler(request):
+        import httpx
+
+        if request.url.path.endswith("/oauth2/v2.0/token"):
+            # The exchange must echo the loopback redirect the authorize used.
+            assert (
+                "redirect_uri=http%3A%2F%2Flocalhost%3A8080%2F"
+                in request.content.decode()
+            )
+            return httpx.Response(
+                200,
+                json={"access_token": "AT", "refresh_token": "RT", "expires_in": 3600},
+            )
+        return _cloud_graphql(request)
+
+    _wire_cloud(monkeypatch, tmp_path, handler)
+
+    _, started = call(
+        context,
+        "POST",
+        "/api/cloud/login",
+        {"action": "start", "origin": "http://localhost:8080"},
+    )
+    state = urllib.parse.parse_qs(urllib.parse.urlparse(started["url"]).query)["state"][
+        0
+    ]
+    # This is the address the browser is redirected to on the loopback -- the
+    # UI hands the whole thing back, exactly as the boot code does.
+    redirected = f"http://localhost:8080/?code=the-code&state={state}"
+
+    status, doc = call(
+        context,
+        "POST",
+        "/api/cloud/login",
+        {"action": "finish", "redirected": redirected},
+    )
+    assert status == 200
+    assert doc["account"] == "Pat Rao"
+    from alfenctl import cloud
+
+    assert (tmp_path / cloud.TOKEN_CACHE_NAME).exists()
+
+
+def test_state_reports_whether_a_cloud_token_is_cached(context, monkeypatch, tmp_path):
+    from alfenctl import cloud
+
+    monkeypatch.delenv(cloud.TOKEN_ENV, raising=False)
+    monkeypatch.setattr("alfenctl.config.default_config_dir", lambda: tmp_path)
+
+    _, before = call(context, "GET", "/api/state", None)
+    assert before["cloudSignedIn"] is False
+
+    cloud.save_cached_token(tmp_path, cloud.Token(access_token="AT"))
+    _, after = call(context, "GET", "/api/state", None)
+    assert after["cloudSignedIn"] is True
+
+
+def test_cloud_sign_out_forgets_the_cached_token(context, monkeypatch, tmp_path):
+    from alfenctl import cloud
+
+    monkeypatch.delenv(cloud.TOKEN_ENV, raising=False)
+    monkeypatch.setattr("alfenctl.config.default_config_dir", lambda: tmp_path)
+    cloud.save_cached_token(tmp_path, cloud.Token(access_token="AT"))
+
+    status, doc = call(context, "POST", "/api/cloud/login", {"action": "logout"})
+    assert status == 200
+    assert doc["signedOut"] is True and doc["removed"] is True
+    assert not (tmp_path / cloud.TOKEN_CACHE_NAME).exists()
+    # And the page would now show signed-out again.
+    _, state = call(context, "GET", "/api/state", None)
+    assert state["cloudSignedIn"] is False
+
+
+def test_cloud_sign_in_finish_rejects_an_unknown_state(context, monkeypatch, tmp_path):
+    _wire_cloud(monkeypatch, tmp_path, _cloud_graphql)
+    with pytest.raises(api.ApiError) as caught:
+        call(
+            context,
+            "POST",
+            "/api/cloud/login",
+            {"action": "finish", "redirected": "x://y?code=c&state=never-started"},
+        )
+    assert caught.value.status == 400

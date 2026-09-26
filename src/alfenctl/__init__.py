@@ -9,9 +9,10 @@ splash-screen logo -- all from the command line, no Alfen cloud involved.
 The package is organised by concern:
 
 * :mod:`alfenctl.discovery` -- mDNS browsing (:class:`Station`);
-* :mod:`alfenctl.charger` -- the charger-local HTTP API client
-  (:class:`AlfenCharger`), including the transport quirks the firmware upload
-  needs;
+* :mod:`alfenctl.transport` -- one HTTP connection to one charger: the
+  session, the retry, and the quirks the firmware upload needs;
+* :mod:`alfenctl.charger` -- what that connection can be asked
+  (:class:`AlfenCharger`), one method per endpoint;
 * :mod:`alfenctl.eds` -- the bundled EDS property catalog (names, titles,
   types, enumerations for every known property);
 * :mod:`alfenctl.values` -- merging live properties with the catalog, and
@@ -35,45 +36,61 @@ The package is organised by concern:
   paged download, and probing how far back its buffer reaches;
 * :mod:`alfenctl.errors` -- :class:`AlfenError`, the base of every failure
   this program reports rather than crashes on;
-* :mod:`alfenctl.config` -- the optional ``alfen.toml`` configuration file;
-* :mod:`alfenctl.progress` -- terminal progress rendering;
+* :mod:`alfenctl.config` -- the optional ``alfen.toml`` configuration file,
+  and where firmware is fetched from;
 * :mod:`alfenctl.cli` -- the command-line interface: one module per
   group of commands, and a table that maps a typed word to a handler.
+
+What is not specific to a charger lives in ``devicectl-core`` and is shared
+with the other programs of this shape: the progress protocol
+(:mod:`devicectl.report`, :mod:`devicectl.progress`), the subcommand table
+(:mod:`devicectl.cli.command`), the event broadcaster
+(:mod:`devicectl.web.events`) and the HTTP primitives
+(:mod:`devicectl.web.http`).
 """
 
-from alfenctl.charger import AlfenCharger, ChargerInfo
-from alfenctl.discovery import Station, discover
-from alfenctl.errors import AlfenError
-from alfenctl.firmware import (
-    CompatResult,
-    FirmwareFile,
-    check_compatibility,
-)
-from alfenctl.repo import (
-    Candidate,
-    RemoteFirmware,
-    RepoConfig,
-    RepositoryError,
-    candidates,
-    list_firmware,
-)
+from typing import Any
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
-__all__ = [
-    "AlfenCharger",
-    "AlfenError",
-    "Candidate",
-    "ChargerInfo",
-    "CompatResult",
-    "FirmwareFile",
-    "RemoteFirmware",
-    "RepoConfig",
-    "RepositoryError",
-    "Station",
-    "__version__",
-    "candidates",
-    "check_compatibility",
-    "discover",
-    "list_firmware",
-]
+# Which module each published name lives in, looked up the first time it is
+# asked for.  Importing them here instead -- which is what this file used to
+# do -- made every invocation pay for the lot: `alfenctl --version` built an
+# HTTP client, an mDNS browser, an FTP client and a zip reader, 120 ms of
+# them, to print a string.  PEP 562 keeps the package's published surface
+# exactly as it was and imports nothing until something reaches for it.
+_EXPORTS = {
+    "AlfenCharger": "alfenctl.charger",
+    "ChargerInfo": "alfenctl.charger",
+    "Station": "alfenctl.discovery",
+    "discover": "alfenctl.discovery",
+    "AlfenError": "alfenctl.errors",
+    "CompatResult": "alfenctl.firmware",
+    "FirmwareFile": "alfenctl.firmware",
+    "check_compatibility": "alfenctl.firmware",
+    "RepoConfig": "alfenctl.config",
+    "Candidate": "alfenctl.repo",
+    "RemoteFirmware": "alfenctl.repo",
+    "RepositoryError": "alfenctl.repo",
+    "candidates": "alfenctl.repo",
+    "list_firmware": "alfenctl.repo",
+}
+
+__all__ = ["__version__", *sorted(_EXPORTS)]
+
+
+def __getattr__(name: str) -> Any:
+    """Import the module a published name lives in, the first time it is used."""
+    import importlib
+
+    where = _EXPORTS.get(name)
+    if where is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(importlib.import_module(where), name)
+    globals()[name] = value  # so the next reach for it is a plain lookup
+    return value
+
+
+def __dir__() -> list[str]:
+    """List what this package publishes, imported or not."""
+    return sorted(__all__)

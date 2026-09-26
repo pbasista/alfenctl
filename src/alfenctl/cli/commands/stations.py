@@ -5,13 +5,14 @@ from __future__ import annotations
 import argparse
 import sys
 
+from devicectl.cli.command import Command, Need
+
 from alfenctl import clock, hardware
 from alfenctl.charger import AlfenCharger
-from alfenctl.discovery import discover
-from alfenctl.cli.command import Command, Need
+from alfenctl.cli.commands.license import license_fields
 from alfenctl.cli.exits import EXIT_ERROR, EXIT_OK
 from alfenctl.cli.output import CLOCK_FORMAT, print_table
-from alfenctl.cli.commands.license import license_fields
+from alfenctl.discovery import discover
 
 
 def cmd_list(charger: AlfenCharger | None, args: argparse.Namespace) -> int:
@@ -95,5 +96,5 @@ def add_parsers(
 
 COMMANDS: dict[str, Command] = {
     "list": Command(cmd_list, needs=Need.NOTHING),
-    "info": Command(cmd_info),
+    "info": Command(cmd_info, fans_out=True),
 }

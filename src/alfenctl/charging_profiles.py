@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from devicectl.progress import SECONDS_PER_DAY, SECONDS_PER_HOUR
+
 from alfenctl.charger import AlfenCharger
 from alfenctl.eds import UNSIGNED8, UNSIGNED32
 from alfenctl.errors import AlfenError
@@ -33,11 +35,10 @@ _PROFILE_DOC_VERSION = 2
 # The weekly schedule AddUkSmartChargingProfile builds: block (0 A) during
 # the two weekday peak windows, allow (32 A) the rest of the time -- seconds
 # from Monday 00:00 (the recurring week's startSchedule).
-_PEAK_START_1 = 8 * 3600  # 08:00
-_OFFPEAK_START_1 = 11 * 3600  # 11:00
-_PEAK_START_2 = 16 * 3600  # 16:00
-_OFFPEAK_START_2 = 22 * 3600  # 22:00
-_SECONDS_PER_DAY = 86400
+_PEAK_START_1 = 8 * SECONDS_PER_HOUR  # 08:00
+_OFFPEAK_START_1 = 11 * SECONDS_PER_HOUR  # 11:00
+_PEAK_START_2 = 16 * SECONDS_PER_HOUR  # 16:00
+_OFFPEAK_START_2 = 22 * SECONDS_PER_HOUR  # 22:00
 _WEEKDAYS = 5  # Monday..Friday get the peak/off-peak pattern
 _ALLOW_A = 32
 _BLOCK_A = 0
@@ -158,7 +159,7 @@ def uk_default_profile(now: datetime | None = None) -> dict[str, Any]:
             {"startPeriod": offset + _PEAK_START_2, "limit": _BLOCK_A},
             {"startPeriod": offset + _OFFPEAK_START_2, "limit": _ALLOW_A},
         ]
-        offset += _SECONDS_PER_DAY
+        offset += SECONDS_PER_DAY
 
     return {
         "connectorId": 0,

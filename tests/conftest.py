@@ -185,7 +185,7 @@ class FakeCharger:
         self.uploads: list[bytes] = []
         self.on_upload_progress = None
 
-    def login(self) -> None:
+    def login(self, timeout: float | None = None) -> None:
         if self.login_error is not None:
             raise self.login_error
         self.logged_in = True
@@ -321,9 +321,10 @@ class FakeCharger:
     def wifi_scan(self) -> str:
         return json.dumps({"scan_results": self.docs.get("/api/wifiscan", [])})
 
-    def set_datetime(self, is_ahp: bool = False, when=None):
-        self.synced = when or datetime.now(timezone.utc)
-        return self.synced
+    def send_clock(self, stamp: str, *, is_ahp: bool = False) -> None:
+        self.synced = datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc
+        )
 
     def set_domain_item(self, item_type: int, data: bytes) -> None:
         self.domain_items.append((item_type, data))
@@ -381,7 +382,9 @@ class FakeResponse:
 DISCOVER_SITES = (
     "alfenctl.cli.target",
     "alfenctl.cli.commands.stations",
-    "alfenctl.cli.commands.scn",
+    # `scn.probe_peers` is the domain function both front ends call; the CLI
+    # group no longer browses for itself.
+    "alfenctl.scn",
 )
 
 
@@ -391,7 +394,13 @@ def patch_discover(monkeypatch, fn) -> None:
         monkeypatch.setattr(f"{module}.discover", fn)
 
 
-CHARGER_SITES = ("alfenctl.cli.target", "alfenctl.cli.commands.scn")
+CHARGER_SITES = (
+    "alfenctl.cli.target",
+    # `scn` opens sessions of its own to the peers: `probe_peers` reads
+    # them, and the CLI group writes to them.
+    "alfenctl.scn",
+    "alfenctl.cli.commands.scn",
+)
 
 
 def patch_charger(monkeypatch, ctor) -> None:

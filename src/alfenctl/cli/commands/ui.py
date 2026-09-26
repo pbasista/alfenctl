@@ -1,4 +1,9 @@
-"""``alfenctl ui`` -- serve the web interface.
+"""``alfenctl ui`` -- serve the web interface, and what ``alfenctl`` does alone.
+
+The web interface is this program's main way of being used, so it is what
+running the bare name does: ``alfenctl`` is ``alfenctl ui``, and every
+option this command takes can be given straight after it.  The rewrite is
+:func:`~alfenctl.cli.parser.insert_default_command`.
 
 The only command that opens no charger session of its own: the server
 makes one when a browser asks for something that needs it, and hands it
@@ -10,51 +15,34 @@ from __future__ import annotations
 import argparse
 import sys
 
-from alfenctl.config import load_config
+from devicectl.cli.command import Command, Need
+
 from alfenctl.charger import AlfenCharger
-from alfenctl.cli.command import Command, Need
 from alfenctl.cli.exits import EXIT_ERROR
+from alfenctl.cli.output import error
 from alfenctl.cli.target import resolve_target
-
-
-def _parse_listen(text: str) -> tuple[str, int]:
-    """Split ``--listen`` into a host and a port.
-
-    Takes ``HOST``, ``HOST:PORT``, ``[v6]:PORT`` or a bare ``PORT``, so
-    ``--listen 9000`` and ``--listen 0.0.0.0`` both mean what they look like.
-    """
-    from alfenctl.web import DEFAULT_HOST, DEFAULT_PORT
-
-    raw = text.strip()
-    if not raw:
-        return DEFAULT_HOST, DEFAULT_PORT
-    if raw.isdigit():
-        return DEFAULT_HOST, int(raw)
-    if raw.startswith("["):  # [::1] or [::1]:8088
-        host, _, rest = raw[1:].partition("]")
-        port = rest.lstrip(":")
-        return host, int(port) if port else DEFAULT_PORT
-    host, sep, port = raw.rpartition(":")
-    if not sep or not port.isdigit():
-        return raw, DEFAULT_PORT
-    return host or DEFAULT_HOST, int(port)
+from alfenctl.config import load_config
 
 
 def cmd_ui(charger: AlfenCharger | None, args: argparse.Namespace) -> int:
     """Serve the web UI (no charger session: the server makes its own)."""
-    from alfenctl.web import serve
+    from devicectl.web.server import parse_listen
+
+    from alfenctl.web import DEFAULT_HOST, DEFAULT_PORT, serve
     from alfenctl.web.session import Target
 
     config = load_config(args.config)
     try:
-        host, port = _parse_listen(args.listen)
+        host, port = parse_listen(
+            args.listen, default_host=DEFAULT_HOST, default_port=DEFAULT_PORT
+        )
     except ValueError:
-        print(f"error: cannot read --listen '{args.listen}'", file=sys.stderr)
+        error(f"cannot read --listen '{args.listen}'")
         return EXIT_ERROR
     try:
         station, username, password = resolve_target(args, config)
     except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        error(str(exc))
         return EXIT_ERROR
     target = None
     if station is not None:
@@ -93,8 +81,9 @@ def add_parsers(
     """Add this group's commands to the root parser."""
     sp = sub.add_parser(
         "ui",
-        help="serve the web interface in a browser",
-        description="Serve the web interface on this machine. The server keeps "
+        help="serve the web interface (this is what alfenctl does with no arguments)",
+        description="Serve the web interface on this machine, which is what "
+        "alfenctl does when it is run with no command at all. The server keeps "
         "the one connection the charger allows and shows every open page what "
         "it is doing, so several people can watch the same station.",
         parents=[common],

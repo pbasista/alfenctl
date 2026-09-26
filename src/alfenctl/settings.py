@@ -42,8 +42,6 @@ different hardcoded passphrase, ``ICUConfig.cs``), in the test suite.
 
 from __future__ import annotations
 
-from alfenctl.errors import AlfenError
-
 import base64
 import binascii
 import hashlib
@@ -51,6 +49,8 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from xml.etree import ElementTree
+
+from alfenctl.errors import AlfenError
 
 # The XMLVersion the app writes and the only one it accepts.
 XML_VERSION = "1.0"

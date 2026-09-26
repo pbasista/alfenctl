@@ -1195,6 +1195,100 @@ errorDescriptors | INTERNAL_SERVER_ERROR | Something went wrong, please try agai
 
 CSLanguageValue (string values, used by 205D_0 display language): en_GB, nl_NL, de_DE, fr_FR, it_IT, nn_NO, de_LU, pt_PT, es_ES, sv_SE, fi_FI, pl_PL, da_DK, ro_RO, cz_CZ, cs_CZ, hu_HU, is_IS, lv_LV, sk_SK, si_SL, ca_ES, hr_HR | decompiled.js@30378852 | high
 
+### Console command map and concrete transport
+
+Source: direct disassembly of the MyEve 2.3.1 XAPK, reviewed on 2026-09-08.
+Bundle: `com.alfen.myeve.apk/assets/index.android.bundle`,
+8,464,452 bytes, Hermes v96, SHA256
+`343005158d1b85792de89d9e812f64630f6790cbd4da47d1a12718f4a206a1fb`.
+Function offsets below refer to that binary, not the generated JavaScript.
+
+Function #29352 starts at `0x67594a`. Its immediate
+`LoadConstString` / `PutById` pairs define these command mappings:
+
+| action | console string | relative bytecode offsets |
+| --- | --- | --- |
+| `flashmemoryInfo` | `flash-info` | `+0xed`, `+0xf1` |
+| `flashmemoryDump` | `flash-dump` | `+0xf7`, `+0xfb` |
+
+The client sends these command literals through the dispatch path below.
+In reported NG910-60027 operation, neither command produced observable
+action or log output. Availability and authorization are firmware-specific.
+
+#### Dispatch through the default station API
+
+1. #29359 builds `CommandLineDropdown`; #29360 filters its choices.
+   The four common command values are `forcefirmwarepermanent`, `reboot`,
+   `txerase`, and `eepromx erase config`.
+2. The selected text reaches #29357 (`0x675d7b`). At `+0x37..0x41`,
+   `state.trim()` is stored in register 6. At `+0x99..0xa5`, the code calls
+   `station.api.executeCommand(trimmedString)` with register 6.
+3. The `{command, csName}` object at `+0x44..0x58` is stored in register 7
+   and later passed to notification `formatMessage`. The API receives the
+   command string from register 6, separately from this notification object.
+4. `ChargingStation` #20566 selects `createDefaultCsApi(this)` when no
+   injected API factory is supplied. #20790 (`0x586a8a`) constructs
+   `CsApi(new CsHttpClient(station))`; #20657 stores that HTTP client.
+5. `CsApi.executeCommand`'s generator #20699 (`0x585a04`) calls
+   `httpClient.post({endpoint: "/cmd", data: {command: argument}})`.
+6. `CsHttpClient.post` #22704 (`0x5abeb2`) calls `createUrl`, then
+   `session.withLogin`; its callback #22705 submits method `POST`, that
+   URL, and the original data object as the request body.
+7. `createUrl` #22706 (`0x5abfa9`) concatenates
+   `station.baseUrl + "/api" + endpoint`. The `baseUrl` getter #20578
+   (`0x583677`) constructs `https://` + station IP + optional port.
+
+The default HTTP requests are:
+
+```text
+POST https://<station-ip>[:port]/api/cmd
+{"command":"flash-info"}
+
+POST https://<station-ip>[:port]/api/cmd
+{"command":"flash-dump"}
+```
+
+Both commands use the standard console endpoint without additional
+parameters, a separate console login sequence, or AHP/NG command translation.
+The station class supports an injected API factory; this trace describes
+the default implementation. #20699 discards the resolved response and
+returns undefined, so the screen's success notification indicates
+submission rather than command-handler output.
+
+#### Availability and authentication
+
+#29363 (`0x67627e`) computes:
+
+```text
+limited = !(firmwareVersionHasPasswordSupport(station.isAHP,
+                                            station.firmwareVersion)
+            && station.LoginType === ChargingStationUserType.SSA)
+```
+
+`LoginType` is the station's selected login role, separate from the signed-in
+cloud user's global role: getter #20605 returns `loginUserType`. #29360
+permits only the four common command values when access is limited.
+The client-side filter and server-side authorization are separate.
+
+For session authentication, credential lookup #22686 calls
+`passwordManager.getCSApiCredentials(station.identifier,
+station.loginUserType)`. Its generator #11518 retrieves JSON from
+`temporaryStorage` under a key containing `@MYEVE_CS_API_CREDENTIALS`,
+upper-cased station identifier, and converted user type; it errors when
+credentials are absent. Session login #22716 sends the credentials to
+`/api/login`.
+
+The traced dispatch code does not check charging/idle state or enter a
+service mode by console command; firmware-side conditions are not
+described by that client code. The captured NG910 log records `date ...`
+requests followed shortly by `Invalid password (service)` or
+`taskCommandLine.:34:Incorrect password`
+(`research/artifacts/ACE0781464.log:970-975,44-48,17`).
+[INFERENCE] This timing is consistent with an additional command-level
+authorization check. It does not establish the check's implementation or
+the availability of flash command handlers. The capture does not include
+the reported `flash-info` and `flash-dump` submissions.
+
 ## Unit strings
 
 Units are embedded in the display names (no separate unit field): '(A)' = amps (2062_0, 2067_0, 2068_0, 2068_1, 2068_2, 206A_0), '(s)' = seconds (206B_2), '(W)' = watts (206B_3), '(kWh)' on energy meter regs, '(ms)' where noted, '(EUR)'-style currency on 3262_1 'EUR'.
@@ -1209,3 +1303,46 @@ Units are embedded in the display names (no separate unit field): '(A)' = amps (
 
 * Endpoint `/api/cmdn_url` string present in bundle (custom Alfen API path) | bundle strings.
 * Property values are addressed by the same `id` strings; app normalizes to zero-padded `PPPP_SS`.
+
+## Manufacturer back end (My Eve cloud) — auth + GraphQL
+
+Source: `myeve/decompiled.js` (offsets are into that file). This is how the
+app talks to Alfen's servers, as opposed to the local charger API above.
+alfenctl's `src/alfenctl/cloud.py` implements the owner-facing subset.
+
+**Backend config** (decompiled.js ~351908): GraphQL endpoint
+`https://graphql-prd.myeve.alfenservices.com/graphql` (siblings `/firmware`,
+`/logoUpload`, `/host`). Requests are `POST` with `content-type:
+application/json` and `authorization: Bearer <token>`.
+
+**Auth — Azure AD B2C** (decompiled.js ~351914). The bundle carries only the
+*config*; the token exchange itself is in the native MSAL module (no
+`grant_type`/`b2clogin`/`oauth2` strings in the JS), i.e. the interactive
+authorization-code + PKCE flow on Alfen's hosted page. There is **no** ROPC
+(username/password) grant. Config:
+`clientId 2a34fd15-7f9a-4f4a-85a3-6e69b7864d9f`,
+tenant `alfenidentityprd` / `onmicrosoft.com`,
+sign-in policy `b2c_1a_claimsrest_susi`, reset policy `b2c_1_pwd_reset`,
+knownAuthorities `account.alfen.com` (custom domain), issuerHost `alfen.com`,
+redirect `com.alfen.myeve://oauth/redirect`, scopes
+`openid profile offline_access`. So the derived endpoints are
+`https://account.alfen.com/alfenidentityprd.onmicrosoft.com/b2c_1a_claimsrest_susi/oauth2/v2.0/{authorize,token}`.
+
+**GraphQL operations** (decompiled.js ~728799–729400), field selections as
+the bundle spells them:
+* `getLicenseKey(identifier: String!, sockets: Int!, objectCode: String) { identifier licenseKey }`
+* `getWarrantyEnddate(chargePointSerialNumber: String!) { warrantyType warrantyEnddate }`
+* `getAuthenticatedUser { uuid profileInformation { firstName lastName phoneNumber company myEveAppTermsAccepted } }`
+* `getFactoryDefaults(identifier, sockets, objectCode) { identifier properties { id value } }`
+* also `getAvailableFirmware`, `getAvailableBackOfficePresets`, `editUserProfile`,
+  `deleteUserProfile`, `logPropertyChanges(serialNumber, properties: [JSON!]!)`,
+  `getLocationCoordinates`, `getLocationAddress`, `findLastCreatedAtBySerialNumber`,
+  `createCommission`.
+
+`getLicenseKey` is the upgrade path the request targeted: Alfen provisions
+the upgrade server-side, the owner fetches the new key here, and it is
+written to the charger's `21A1_0` (same write as `license set`). `identifier`
+= station serial (`2051_0`), `sockets` = `205E_0`, `objectCode` optional.
+The Windows app reaches the same key through the ISAH ERP (`installer.alfen.com`,
+HTTP Basic with the installer account, property `8609` of the returned
+`IWSObject`) — a different account, not implemented.

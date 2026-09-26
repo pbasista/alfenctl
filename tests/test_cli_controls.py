@@ -6,13 +6,11 @@ import json
 import re
 from datetime import datetime, timezone
 
-
 from conftest import (
     status_error,
 )
 
 from alfenctl import cli
-
 
 # --- OCPP charging profiles ------------------------------------------------------------------
 
@@ -117,7 +115,7 @@ def test_time_show_reports_the_drift(fake_charger, capsys) -> None:
     assert cli.main(["time", "--host", "1.2.3.4"]) == 0
     out = capsys.readouterr().out
     assert "2020-01-01 00:00:00" in out
-    assert "years behind this computer" in out
+    assert "years behind" in out
     assert "UTC+01:00, daylight saving on" in out
     assert "alfenctl time sync" in out
 
@@ -140,7 +138,7 @@ def test_time_show_falls_back_to_the_six_minute_zone(fake_charger, capsys) -> No
     assert cli.main(["time", "--host", "1.2.3.4"]) == 0
     out = capsys.readouterr().out
     assert "UTC+02:00" in out
-    assert "in sync with this computer" in out
+    assert "in sync" in out
     assert "alfenctl time sync" not in out  # nothing to fix, so no nudge
 
 

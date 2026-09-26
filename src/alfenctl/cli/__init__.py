@@ -5,13 +5,17 @@ commands:
 
 * :mod:`alfenctl.cli.main` -- parse, open what the command needs, run it;
 * :mod:`alfenctl.cli.parser` -- the root parser and the shared options;
-* :mod:`alfenctl.cli.command` -- what a subcommand is (:class:`Command`);
 * :mod:`alfenctl.cli.commands` -- the command groups, and the table that
   maps a typed word to the function that runs it;
 * :mod:`alfenctl.cli.target` -- which charger, and as whom;
 * :mod:`alfenctl.cli.output` -- tables, shared formats, the one prompt;
 * :mod:`alfenctl.cli.report` -- progress on a terminal;
 * :mod:`alfenctl.cli.exits` -- the process exit codes.
+
+What a subcommand *is* -- :class:`~devicectl.cli.command.Command` and the
+:class:`~devicectl.cli.command.Need` it declares -- comes from
+``devicectl-core``, along with the three exit codes that mean the same
+thing in every program of this shape.
 
 To add a command: write the handler in the right module of
 :mod:`alfenctl.cli.commands`, describe it in that module's

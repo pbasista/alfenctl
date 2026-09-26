@@ -10,19 +10,25 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime
-from pathlib import Path
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+
+from devicectl.cli.command import Command
+from devicectl.progress import bar, end_live, fmt_duration, write_live
 
 from alfenctl import transactions
 from alfenctl.charger import AlfenCharger, ChargerInfo
+from alfenctl.cli.exits import EXIT_ERROR, EXIT_OK
+from alfenctl.cli.output import confirm, print_table, write_out
 from alfenctl.logs import (
     FOLLOW_INTERVAL_S,
     LOG_TYPES,
-    LogLine,
     MAX_LOG_PAGES,
+    PROGRESS_MIN_INTERVAL_S,
     SINCE_HELP,
     Download,
-    DownloadProgress,
+    LogLine,
     ahp_page_lines,
     download,
     format_age,
@@ -31,10 +37,61 @@ from alfenctl.logs import (
     poll,
     probe_range,
 )
-from alfenctl.progress import end_live, write_live
-from alfenctl.cli.command import Command
-from alfenctl.cli.exits import EXIT_ERROR, EXIT_OK
-from alfenctl.cli.output import confirm, print_table
+
+# --- the download's live line --------------------------------------------------------------
+# :func:`alfenctl.logs.download` says how it is getting on by calling whatever
+# it was handed after every page, and never prints: the browser turns the same
+# calls into job progress.  Drawing them is a terminal's business, so it is
+# done here rather than there.
+
+
+@dataclass
+class DownloadProgress:
+    """Draws the download's live stderr line (or logs it, in ``--debug``)."""
+
+    since: datetime | None
+    debug: bool = False
+    now: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    _last_draw: float = field(default=0.0, init=False)
+
+    def fraction(self, reached: datetime | None) -> float | None:
+        """How much of the requested span is covered, or None when unbounded."""
+        if self.since is None or reached is None:
+            return None
+        span = (self.now - self.since).total_seconds()
+        if span <= 0:
+            return 1.0
+        return max(0.0, min(1.0, (self.now - reached).total_seconds() / span))
+
+    def __call__(self, state: Download, *, final: bool = False) -> None:
+        """Redraw (or log) the line for one just-fetched page."""
+        reached = state.oldest
+        frac = 1.0 if final else self.fraction(reached)
+        back = f"back to {format_time(reached)}" if reached else "reading"
+        if self.debug:
+            if not final:
+                print(
+                    f"[debug] -- log page {state.pages}: {state.fetched} lines, {back}",
+                    file=sys.stderr,
+                )
+            return
+        now = time.monotonic()
+        if not final and now - self._last_draw < PROGRESS_MIN_INTERVAL_S:
+            return  # throttle mid-download redraws, but always draw the last one
+        self._last_draw = now
+        shown = f"[{bar(frac)}] {frac:4.0%}  " if frac is not None else ""
+        write_live(
+            f"  Downloading log  {shown}{state.fetched} lines  {back}  "
+            f"elapsed {fmt_duration(state.seconds)}"
+        )
+
+    def finish(self, state: Download | None = None) -> None:
+        """Draw the completed line and close it (a no-op in debug mode)."""
+        if self.debug:
+            return
+        if state is not None and state.fetched:
+            self(state, final=True)
+        end_live()
 
 
 def _log_page_lines(charger: AlfenCharger) -> tuple[str, int | None]:
@@ -149,22 +206,15 @@ def cmd_log(charger: AlfenCharger, args: argparse.Namespace) -> int:
         else:
             print("No log lines in the requested period.", file=sys.stderr)
         return EXIT_OK
-    file = getattr(args, "file", None)
-    if file in (None, "-") and sys.stdout.isatty():
-        # Named file by default on a terminal, like export: the charger's
-        # object id keeps one log per device distinguishable.
-        file = f"{object_id}.log"
-    if file in (None, "-"):
-        print("\n".join(lines))
-        return EXIT_OK
-    path = Path(file)
-    if path.exists() and not args.yes:
-        if not confirm(f"'{file}' already exists. Overwrite?"):
-            print("Aborted.", file=sys.stderr)
-            return EXIT_ERROR
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"Wrote {len(lines)} log lines to {file}", file=sys.stderr)
-    return EXIT_OK
+    # Named file by default on a terminal, like export: the charger's object
+    # id keeps one log per device distinguishable.
+    return write_out(
+        "\n".join(lines) + "\n",
+        getattr(args, "file", None),
+        default_name=f"{object_id}.log",
+        yes=args.yes,
+        summary=f"{len(lines)} log lines",
+    )
 
 
 def _report_download(result: Download, since: datetime | None) -> None:
@@ -207,15 +257,10 @@ def _report_download(result: Download, since: datetime | None) -> None:
         )
 
 
-def cmd_transactions(charger: AlfenCharger, args: argparse.Namespace) -> int:
-    """Export the charger's transaction database (charging sessions and events)."""
-    import csv
-    import io
-
-    since = None if args.all else parse_since(args.since)
-    info = charger.basic_info()
-    if args.erase:
-        return _erase_transactions(charger, info, args)
+def _download_transactions(
+    charger: AlfenCharger, args: argparse.Namespace
+) -> transactions.Download:
+    """Read the whole transaction database, saying how it is getting on."""
 
     def tick(state: transactions.Download) -> None:
         if args.debug:
@@ -238,6 +283,44 @@ def cmd_transactions(charger: AlfenCharger, args: argparse.Namespace) -> int:
             f"warning: stopped at the {transactions.MAX_PAGES}-page cap",
             file=sys.stderr,
         )
+    return result
+
+
+def _sessions_for(records: list, args: argparse.Namespace) -> list:
+    """Pair the records into sessions, keeping the socket that was asked for."""
+    rows = transactions.sessions(records)
+    if args.socket is not None:
+        rows = [s for s in rows if s.socket == args.socket]
+    return rows
+
+
+def _transactions_payload(records: list, args: argparse.Namespace) -> tuple[str, str]:
+    """Render the records in the asked-for format, with the suffix to save it under."""
+    import csv
+    import io
+
+    if args.raw:
+        return "\n".join(f"{r.offset}_{r.raw}" for r in records) + "\n", "txt"
+    if args.json:
+        doc = [transactions.record_dict(r) for r in records]
+        return json.dumps(doc, indent=2) + "\n", "json"
+    rows = _sessions_for(records, args)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(transactions.SESSION_COLUMNS)
+    writer.writerows(transactions.session_row(s) for s in rows)
+    print(f"{len(rows)} charging session(s).", file=sys.stderr)
+    return buf.getvalue(), "csv"
+
+
+def cmd_transactions(charger: AlfenCharger, args: argparse.Namespace) -> int:
+    """Export the charger's transaction database (charging sessions and events)."""
+    since = None if args.all else parse_since(args.since)
+    info = charger.basic_info()
+    if args.erase:
+        return _erase_transactions(charger, info, args)
+
+    result = _download_transactions(charger, args)
     if result.empty or not result.records:
         print("The transaction database is empty.", file=sys.stderr)
         return EXIT_OK
@@ -250,47 +333,16 @@ def cmd_transactions(charger: AlfenCharger, args: argparse.Namespace) -> int:
     if not records:
         print("No transactions in the requested period.", file=sys.stderr)
         return EXIT_OK
-
     if args.summary:
-        rows = transactions.sessions(records)
-        if args.socket is not None:
-            rows = [s for s in rows if s.socket == args.socket]
-        return _print_summary(rows, args.summary)
+        return _print_summary(_sessions_for(records, args), args.summary)
 
-    if args.raw:
-        payload = "\n".join(f"{r.offset}_{r.raw}" for r in records) + "\n"
-        suffix = "txt"
-    elif args.json:
-        payload = (
-            json.dumps([transactions.record_dict(r) for r in records], indent=2) + "\n"
-        )
-        suffix = "json"
-    else:
-        rows = transactions.sessions(records)
-        if args.socket is not None:
-            rows = [s for s in rows if s.socket == args.socket]
-        buf = io.StringIO()
-        writer = csv.writer(buf)
-        writer.writerow(transactions.SESSION_COLUMNS)
-        writer.writerows(transactions.session_row(s) for s in rows)
-        payload = buf.getvalue()
-        suffix = "csv"
-        print(f"{len(rows)} charging session(s).", file=sys.stderr)
-
-    file = args.file
-    if file in (None, "-") and sys.stdout.isatty():
-        file = f"{info.object_id or 'charger'}-transactions.{suffix}"
-    if file in (None, "-"):
-        sys.stdout.write(payload)
-        return EXIT_OK
-    path = Path(file)
-    if path.exists() and not args.yes:
-        if not confirm(f"'{file}' already exists. Overwrite?"):
-            print("Aborted.", file=sys.stderr)
-            return EXIT_ERROR
-    path.write_text(payload, encoding="utf-8")
-    print(f"Wrote {file}", file=sys.stderr)
-    return EXIT_OK
+    payload, suffix = _transactions_payload(records, args)
+    return write_out(
+        payload,
+        args.file,
+        default_name=f"{info.object_id or 'charger'}-transactions.{suffix}",
+        yes=args.yes,
+    )
 
 
 def _hours(span) -> str:
@@ -370,7 +422,8 @@ def add_parsers(
     sp.add_argument(
         "file",
         nargs="?",
-        help="output file (default: <object-id>.log to a terminal, else stdout)",
+        help="output file ('-' for stdout; default: <object-id>.log to a "
+        "terminal, else stdout)",
     )
     sp.add_argument(
         "--since",
@@ -433,8 +486,8 @@ def add_parsers(
     sp.add_argument(
         "file",
         nargs="?",
-        help="output file (default: <object-id>-transactions.<ext> to a "
-        "terminal, else stdout)",
+        help="output file ('-' for stdout; default: "
+        "<object-id>-transactions.<ext> to a terminal, else stdout)",
     )
     sp.add_argument(
         "--since",

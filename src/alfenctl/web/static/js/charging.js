@@ -7,21 +7,11 @@
  * connection, edited as cards with one Apply each.
  */
 
-import { html, useState } from '../vendor/preact-htm.module.js';
-import {
-  Apply,
-  EnumRow,
-  Loading,
-  NumRow,
-  PanelError,
-  putPanel,
-  TextRow,
-  ToggleRow,
-  useDraft,
-  usePanel,
-} from './panels.js';
 
-import { Card, Caveats, Confirm, Row } from './ui.js';
+import { offerWriter, useDraft } from '/core/js/drafts.js';
+import { EnumRow, NumRow, panelWait, putPanel, TextRow, ToggleRow, usePanel } from '/core/js/panels.js';
+import { Card, Caveats, caller, Row, useConfirm } from '/core/js/ui.js';
+import { html, useState } from '/core/vendor/preact-htm.module.js';
 
 /* --- load balancing and solar ------------------------------------------------ */
 
@@ -34,110 +24,106 @@ import { Card, Caveats, Confirm, Row } from './ui.js';
  * questions in any case: whether the station balances at all and against
  * what it measures, then the numbers it is held to when it does.
  */
-function useBalancing({ onLoad }) {
+function useBalancing({ onLoad, scope }) {
   /* Every hook first, and unconditionally.  Preact matches hooks up by the
    * order they are called in, so a `useDraft` sitting below an early
    * return belongs to a different slot on the render that has a document
    * than on the render that did not -- which is a card that quietly wears
    * another card's state the moment its read lands. */
-  const [doc, loading, error, read] = usePanel('lb', onLoad);
-  const edits = useDraft();
+  const panel = usePanel('lb', onLoad);
+  const [doc] = panel;
+  const draft = useDraft(scope);
   const live = doc?.loadbalancing || {};
   return {
+    panel,
     doc,
-    loading,
-    error,
-    read,
-    edits,
+    draft,
     live,
     opts: live.options || {},
     bounds: live.bounds || {},
-    get: (key) => edits.get(key, live[key]),
-    set: (key) => (value) => edits.set(key, value),
+    get: (key) => draft.get(key, live[key]),
+    set: (key) => (value) => draft.set(key, value),
   };
 }
 
 /* The toast belongs to whoever does the writing, and that is `onWrite` --
  * saying it here as well is how one Apply used to raise two identical
- * notices.  An empty draft is an Apply nobody made a change for. */
-function sendBalancing(edits, onWrite) {
-  return () => {
-    const payload = { ...edits.draft };
-    if (!Object.keys(payload).length) {
-      edits.clear();
-      return;
-    }
-    onWrite(payload).catch(() => {});
-    edits.clear();
-  };
+ * notices. */
+function offerBalancing(scope, title, { busy, readOnly, onWrite }) {
+  offerWriter(scope, { title, busy, disabled: readOnly, write: onWrite });
 }
 
 function Balancing({ readOnly, busy, onLoad, onWrite }) {
-  const { doc, loading, error, read, edits, live, opts, get, set } = useBalancing({
+  const { panel, draft, live, opts, get, set } = useBalancing({
     onLoad,
+    scope: 'lb:balancing',
   });
 
-  if (error) return html`<${PanelError} error=${error} loading=${loading} onRetry=${read} title="Load balancing" />`;
-  if (!doc) return html`<${Loading} loading=${loading} what="Reading load balancing..." title="Load balancing" />`;
+  const waiting = panelWait(panel, { title: 'Load balancing', what: 'Reading load balancing...' });
+  if (waiting !== undefined) return waiting;
 
-  return html`<${Card} title="Load balancing">
+  offerBalancing('lb:balancing', 'Load balancing', { busy, readOnly, onWrite });
+  return html`<${Card} title="Load balancing" draft=${draft}>
 
     <${ToggleRow}
+      pending=${draft.has('static')}
       k="Static balancing"
       value=${get('static')}
       onChange=${set('static')}
       disabled=${readOnly || busy}
       label="cap against the feed"
-      title="cap the station when the meter says the supply behind it is loaded"
+      hint="cap the station when the meter says the supply behind it is loaded"
     />
     <${ToggleRow}
+      pending=${draft.has('active')}
       k="Active balancing"
       value=${get('active')}
       onChange=${set('active')}
       disabled=${readOnly || busy}
       label="follow the meter"
-      title="hold the station to whatever the meter is measuring, moment by moment"
+      hint="hold the station to whatever the meter is measuring, moment by moment"
     />
     <${EnumRow}
+      pending=${draft.has('protocol')}
       k="Meter protocol"
       readOnly=${readOnly}
       value=${get('protocol')}
-      table=${opts.protocols}
+      table=${opts.protocol}
       onChange=${set('protocol')}
       disabled=${busy}
       includeBlank
     />
     <${EnumRow}
+      pending=${draft.has('dataSource')}
       k="Data source"
       readOnly=${readOnly}
       value=${get('dataSource')}
-      table=${opts.dataSources}
+      table=${opts.dataSource}
       onChange=${set('dataSource')}
       disabled=${busy}
       includeBlank
     />
     <${EnumRow}
+      pending=${draft.has('measurementIncludesEv')}
       k="Measurement"
       readOnly=${readOnly}
       value=${get('measurementIncludesEv')}
-      table=${opts.measurementSources}
+      table=${opts.measurementIncludesEv}
       kind="boolean"
       onChange=${set('measurementIncludesEv')}
       disabled=${busy}
-      title="whether the meter's reading already has the car in it"
+      hint="whether the meter's reading already has the car in it"
     />
     <${Caveats}
       items=${(live.warnings || []).map((w) => ({ short: w, detail: w }))}
     />
-    ${!readOnly &&
-    html`<${Apply} edits=${edits} busy=${busy} onApply=${sendBalancing(edits, onWrite)} />`}
   <//>`;
 }
 
 /* What the station is held to once it is balancing: the ceiling, the
  * floor it falls back to, and how it is allowed to use its phases. */
 function Limits({ readOnly, busy, onLoad, onWrite }) {
-  const { doc, loading, error, edits, live, bounds, get, set } = useBalancing({ onLoad });
+  const { panel, draft, live, bounds, get, set } = useBalancing({ onLoad, scope: 'lb:limits' });
 
   /* The card above reports the *failure* for both of them -- one endpoint
    * saying it twice is one endpoint shouting -- but not the wait.  A card
@@ -145,40 +131,42 @@ function Limits({ readOnly, busy, onLoad, onWrite }) {
    * not know is coming: three panels behind one read put up one skeleton
    * and then landed as three, and every card below them jumped a row.  A
    * skeleton is a card's way of saying it will be here. */
-  if (error) return null;
-  if (!doc) {
-    return html`<${Loading}
-      loading=${loading}
-      what="Reading load balancing..."
-      title="Current limits and phases"
-    />`;
-  }
+  const waiting = panelWait(panel, {
+    title: 'Current limits and phases',
+    what: 'Reading load balancing...',
+    quiet: true,
+  });
+  if (waiting !== undefined) return waiting;
 
-  return html`<${Card} title="Current limits and phases">
+  offerBalancing('lb:limits', 'Current limits and phases', { busy, readOnly, onWrite });
+  return html`<${Card} title="Current limits and phases" draft=${draft}>
     <${NumRow}
+      pending=${draft.has('maxMeterCurrentA')}
       k="Max meter current"
       readOnly=${readOnly}
       value=${get('maxMeterCurrentA')}
       live=${live.maxMeterCurrentA}
-      min=${bounds.minMeterCurrentA}
-      max=${bounds.maxMeterCurrentA}
+      min=${bounds.maxMeterCurrentA?.min}
+      max=${bounds.maxMeterCurrentA?.max}
       unit="A"
       onChange=${set('maxMeterCurrentA')}
       disabled=${busy}
     />
     <${NumRow}
+      pending=${draft.has('safeCurrentA')}
       k="Safe current"
       readOnly=${readOnly}
       value=${get('safeCurrentA')}
       live=${live.safeCurrentA}
-      min=${bounds.minSafeCurrentA}
-      max=${bounds.maxSafeCurrentA}
+      min=${bounds.safeCurrentA?.min}
+      max=${bounds.safeCurrentA?.max}
       unit="A"
       onChange=${set('safeCurrentA')}
       disabled=${busy}
-      title="what the station falls back to when nothing is managing it"
+      hint="what the station falls back to when nothing is managing it"
     />
     <${NumRow}
+      pending=${draft.has('maxImbalanceA')}
       k="Max imbalance"
       readOnly=${readOnly}
       value=${get('maxImbalanceA')}
@@ -189,6 +177,7 @@ function Limits({ readOnly, busy, onLoad, onWrite }) {
       disabled=${busy}
     />
     <${TextRow}
+      pending=${draft.has('phaseRotation')}
       k="Phase rotation"
       readOnly=${readOnly}
       value=${get('phaseRotation')}
@@ -199,14 +188,16 @@ function Limits({ readOnly, busy, onLoad, onWrite }) {
       disabled=${busy}
     />
     <${ToggleRow}
+      pending=${draft.has('phaseSwitching')}
       k="Phase switching"
       value=${get('phaseSwitching')}
       onChange=${set('phaseSwitching')}
       disabled=${readOnly || busy}
       label="allow one or three"
-      title="let the station switch between single-phase and multiphase charging"
+      hint="let the station switch between single-phase and multiphase charging"
     />
     <${EnumRow}
+      pending=${draft.has('maxAllowedPhases')}
       k="Max allowed phases"
       readOnly=${readOnly}
       value=${get('maxAllowedPhases')}
@@ -215,8 +206,6 @@ function Limits({ readOnly, busy, onLoad, onWrite }) {
       disabled=${busy}
       includeBlank
     />
-    ${!readOnly &&
-    html`<${Apply} edits=${edits} busy=${busy} onApply=${sendBalancing(edits, onWrite)} />`}
   <//>`;
 }
 
@@ -226,67 +215,64 @@ function Limits({ readOnly, busy, onLoad, onWrite }) {
  * charger connection was two waits for one answer, and two copies of it
  * that could disagree. */
 function Solar({ readOnly, busy, onLoad, onWrite }) {
-  const [doc, loading, error, read] = usePanel('lb', onLoad);
-  const edits = useDraft();
+  const panel = usePanel('lb', onLoad);
+  const [doc] = panel;
+  const draft = useDraft('lb:solar');
 
-  if (error) return html`<${PanelError} error=${error} loading=${loading} onRetry=${read} title="Solar charging" />`;
-  if (!doc) {
-    return html`<${Loading}
-      loading=${loading}
-      what="Reading solar charging..."
-      title="Solar charging"
-    />`;
-  }
+  const waiting = panelWait(panel, {
+    title: 'Solar charging',
+    what: 'Reading solar charging...',
+  });
+  if (waiting !== undefined) return waiting;
+
   const live = doc.loadbalancing || {};
   if (live.solarMode === null || live.solarMode === undefined) return null;
   const opts = live.options || {};
   const bounds = live.bounds || {};
-  const get = (key) => edits.get(key, live[key]);
+  const get = (key) => draft.get(key, live[key]);
 
-  const set = (key) => (value) => edits.set(key, value);
+  const set = (key) => (value) => draft.set(key, value);
 
-  const send = () => {
-    const payload = { ...edits.draft };
-    onWrite(payload).catch(() => {});
-    edits.clear();
-  };
+  offerBalancing('lb:solar', 'Solar charging', { busy, readOnly, onWrite });
 
-  return html`<${Card} title="Solar charging">
+  return html`<${Card} title="Solar charging" draft=${draft}>
     <${EnumRow}
+      pending=${draft.has('solarMode')}
       k="Mode"
       readOnly=${readOnly}
       value=${get('solarMode')}
-      table=${opts.solarModes}
+      table=${opts.solarMode}
       onChange=${set('solarMode')}
       disabled=${busy}
       includeBlank
     />
     <${NumRow}
+      pending=${draft.has('solarGreenShare')}
       k="Green share"
       readOnly=${readOnly}
       value=${get('solarGreenShare')}
       live=${live.solarGreenShare}
-      min=${bounds.minGreenShare}
-      max=${bounds.maxGreenShare}
+      min=${bounds.solarGreenShare?.min}
+      max=${bounds.solarGreenShare?.max}
       unit="%"
       onChange=${set('solarGreenShare')}
       disabled=${busy}
-      title="how much of the available surplus the car may take"
+      hint="how much of the available surplus the car may take"
     />
     <${NumRow}
+      pending=${draft.has('solarComfortW')}
       k="Comfort level"
       readOnly=${readOnly}
       value=${get('solarComfortW')}
       live=${live.solarComfortW}
-      min=${bounds.minComfortW}
-      max=${bounds.maxComfortW}
+      min=${bounds.solarComfortW?.min}
+      max=${bounds.solarComfortW?.max}
       step="50"
       unit="W"
       onChange=${set('solarComfortW')}
       disabled=${busy}
-      title="the minimum the charger always allows in comfort mode"
+      hint="the minimum the charger always allows in comfort mode"
     />
-    ${!readOnly && html`<${Apply} edits=${edits} busy=${busy} onApply=${send} />`}
   <//>`;
 }
 
@@ -302,13 +288,14 @@ function hhmm(seconds) {
 }
 
 function Profiles({ readOnly, busy, onLoad, onInstallUk, onClear }) {
-  const [doc, loading, error, read] = usePanel('profiles', onLoad);
-  const [confirm, setConfirm] = useState(null);
+  const panel = usePanel('profiles', onLoad);
+  const [doc] = panel;
+  const confirm = useConfirm();
 
-  if (error) return html`<${PanelError} error=${error} loading=${loading} onRetry=${read} title="Charging profiles" />`;
-  if (!doc) return html`<${Loading} loading=${loading} what="Reading charging profiles..." title="Charging profiles" />`;
+  const waiting = panelWait(panel, { title: 'Charging profiles', what: 'Reading charging profiles...' });
+  if (waiting !== undefined) return waiting;
 
-  if (doc.supported === false) {
+if (doc.supported === false) {
     return html`<${Card} title="Charging profiles">
       <div class="empty">This charger's firmware does not support charging profiles.</div>
     <//>`;
@@ -317,7 +304,11 @@ function Profiles({ readOnly, busy, onLoad, onInstallUk, onClear }) {
   /* Six columns when there are profiles, one sentence when there are not
    * -- and none is the ordinary state of a charger nobody has sent a
    * profile to, so the card is not a row wide by default. */
-  return html`<${Card} title="Charging profiles" width=${profiles.length ? 'full' : undefined}>
+  return html`<${Card}
+    title="Charging profiles"
+    width=${profiles.length ? 'full' : undefined}
+    immediate=${!readOnly}
+  >
 
     ${profiles.length === 0
       ? html`<div class="empty">
@@ -354,7 +345,7 @@ function Profiles({ readOnly, busy, onLoad, onInstallUk, onClear }) {
                       class="btn small"
                       disabled=${busy}
                       onClick=${() =>
-                        setConfirm({
+                        confirm.ask({
                           title: `Clear profile ${p.id}?`,
                           body: 'The charger stops enforcing this schedule.',
                           confirmLabel: 'Clear',
@@ -370,12 +361,12 @@ function Profiles({ readOnly, busy, onLoad, onInstallUk, onClear }) {
           </table>
         </div>`}
     ${!readOnly &&
-    html`<div class="actions-row">
+    html`<div class="actions">
       <button
         class="btn"
         disabled=${busy}
         onClick=${() =>
-          setConfirm({
+          confirm.ask({
             title: 'Install the UK Smart Charging default?',
             body: 'Charging is blocked 08:00-11:00 and 16:00-22:00 on weekdays, allowed the rest of the time.',
             confirmLabel: 'Install',
@@ -389,7 +380,7 @@ function Profiles({ readOnly, busy, onLoad, onInstallUk, onClear }) {
         class="btn ghost"
         disabled=${busy}
         onClick=${() =>
-          setConfirm({
+          confirm.ask({
             title: 'Clear every profile?',
             body: 'The charger stops enforcing any local schedule.',
             confirmLabel: 'Clear all',
@@ -400,47 +391,42 @@ function Profiles({ readOnly, busy, onLoad, onInstallUk, onClear }) {
         Clear all
       </button>`}
     </div>`}
-    ${confirm &&
-    html`<${Confirm}
-      ...${confirm}
-      onCancel=${() => setConfirm(null)}
-      onConfirm=${() => {
-        const run = confirm.run;
-        setConfirm(null);
-        run();
-      }}
-    />`}
+    ${confirm.node}
   <//>`;
 }
 
 function DirectStart({ readOnly, busy, onLoad, onWrite }) {
-  const [doc, loading, error, read] = usePanel('direct-start', onLoad);
-  const edits = useDraft();
+  const panel = usePanel('direct-start', onLoad);
+  const [doc] = panel;
+  const draft = useDraft('direct-start');
 
-  if (error) return html`<${PanelError} error=${error} loading=${loading} onRetry=${read} title="Direct start" />`;
-  if (!doc) {
-    return html`<${Loading} loading=${loading} what="Reading direct start..." title="Direct start" />`;
-  }
+  const waiting = panelWait(panel, { title: 'Direct start', what: 'Reading direct start...' });
+  if (waiting !== undefined) return waiting;
+
   const live = doc.directStart || {};
   const overrides = live.overrides || {};
   if (!Object.keys(overrides).length && live.randomDelayS === null) return null;
 
   const numbers = Object.keys(overrides).sort();
 
-  const get = (n) => edits.get(`socket${n}`, overrides[n]);
-  const delay = edits.get('randomDelayS', live.randomDelayS);
+  const get = (n) => draft.get(`socket${n}`, overrides[n]);
+  const delay = draft.get('randomDelayS', live.randomDelayS);
 
-  const send = () => {
-    const payload = {
-      sockets: numbers.map(Number),
-      direct: numbers.map((n) => Boolean(get(n))),
-      randomDelayS: delay,
-    };
-    onWrite(payload).catch(() => {});
-    edits.clear();
-  };
+  /* The charger takes every socket at once, so the write is the whole
+   * card as it stands, not only what was changed in it. */
+  offerWriter('direct-start', {
+    title: 'Direct start',
+    busy,
+    disabled: readOnly,
+    write: () =>
+      onWrite({
+        sockets: numbers.map(Number),
+        direct: numbers.map((n) => Boolean(get(n))),
+        randomDelayS: delay,
+      }),
+  });
 
-  return html`<${Card} title="Direct start">
+  return html`<${Card} title="Direct start" draft=${draft}>
     <p class="note">
       Let a socket charge despite an installed profile. With no profile
       installed, this changes nothing.
@@ -448,15 +434,17 @@ function DirectStart({ readOnly, busy, onLoad, onWrite }) {
     <div class="rows">
       ${numbers.map(
         (n) => html`<${ToggleRow}
+          pending=${draft.has(`socket${n}`)}
           key=${n}
           k=${`Socket ${n}`}
           value=${get(n)}
-          onChange=${(v) => edits.set(`socket${n}`, v)}
+          onChange=${(v) => draft.set(`socket${n}`, v)}
           disabled=${readOnly || busy}
           label=${get(n) ? 'direct start' : 'follow the profile'}
         />`
       )}
       <${NumRow}
+        pending=${draft.has('randomDelayS')}
         k="Random delay"
         readOnly=${readOnly}
         value=${delay}
@@ -464,29 +452,29 @@ function DirectStart({ readOnly, busy, onLoad, onWrite }) {
         min="0"
         max=${live.maxDelayS}
         unit="s"
-        onChange=${(v) => edits.set('randomDelayS', v)}
+        onChange=${(v) => draft.set('randomDelayS', v)}
         disabled=${busy}
         title=${`below ${live.compliantDelayS} s the station is no longer compliant with the UK regulation`}
       />
     </div>
-    ${!readOnly && html`<${Apply} edits=${edits} busy=${busy} onApply=${send} />`}
   <//>`;
 }
 
 /* --- Smart Charging Network --------------------------------------------------- */
 
 function Scn({ readOnly, busy, onLoad, onAction }) {
-  const [doc, loading, error, read] = usePanel('scn', onLoad);
+  const panel = usePanel('scn', onLoad);
+  const [doc] = panel;
 
-  const [confirm, setConfirm] = useState(null);
+  const confirm = useConfirm();
   const [name, setName] = useState('');
-  if (error) return html`<${PanelError} error=${error} loading=${loading} onRetry=${read} title="Smart Charging Network" />`;
-  if (!doc) return html`<${Loading} loading=${loading} what="Reading SCN membership..." title="Smart Charging Network" />`;
+  const waiting = panelWait(panel, { title: 'Smart Charging Network', what: 'Reading SCN membership...' });
+  if (waiting !== undefined) return waiting;
 
-  const scn = doc.scn || {};
+const scn = doc.scn || {};
   const members = scn.peers || [];
 
-  return html`<${Card} title="Smart Charging Network">
+  return html`<${Card} title="Smart Charging Network" immediate=${!readOnly}>
     ${scn.inNetwork
       ? html`<div class="rows">
           <${Row} k="Network" v=${scn.name} data=${true} />
@@ -509,12 +497,12 @@ function Scn({ readOnly, busy, onLoad, onAction }) {
         </div>`}
     ${!readOnly &&
       (scn.inNetwork
-        ? html`<div class="actions-row">
+        ? html`<div class="actions">
             <button
               class="btn"
               disabled=${busy}
               onClick=${() =>
-                setConfirm({
+                confirm.ask({
                   title: `Leave '${scn.name}'?`,
                   body: 'The other members keep their settings; this station charges on its own again.',
                   confirmLabel: 'Leave',
@@ -524,7 +512,7 @@ function Scn({ readOnly, busy, onLoad, onAction }) {
               Leave the network
             </button>
           </div>`
-        : html`<div class="actions-row">
+        : html`<div class="actions">
             <input
               type="text"
               placeholder="network name (max 7 chars)"
@@ -537,7 +525,7 @@ function Scn({ readOnly, busy, onLoad, onAction }) {
               class="btn"
               disabled=${busy || !name.trim()}
               onClick=${() =>
-                setConfirm({
+                confirm.ask({
                   title: `Create '${name.trim()}'?`,
                   body: 'This station becomes the network\'s only member. The charger reboots to apply it.',
                   confirmLabel: 'Create',
@@ -550,7 +538,7 @@ function Scn({ readOnly, busy, onLoad, onAction }) {
               class="btn"
               disabled=${busy || !name.trim()}
               onClick=${() =>
-                setConfirm({
+                confirm.ask({
                   title: `Join '${name.trim()}'?`,
                   body: 'The other members on the LAN are found and told. The charger reboots to apply it.',
                   confirmLabel: 'Join',
@@ -560,20 +548,12 @@ function Scn({ readOnly, busy, onLoad, onAction }) {
               Join
             </button>
           </div>`)}
-    ${confirm &&
-    html`<${Confirm}
-      ...${confirm}
-      onCancel=${() => setConfirm(null)}
-      onConfirm=${() => {
-        const run = confirm.run;
-        setConfirm(null);
-        run();
-      }}
-    />`}
+    ${confirm.node}
   <//>`;
 }
 
 export function Charging({ api, readOnly, busy, toast }) {
+  const call = caller(toast);
   const onLbLoad = () => api.get('/lb');
   const onLbWrite = (payload) =>
     api
@@ -595,25 +575,13 @@ export function Charging({ api, readOnly, busy, toast }) {
   const onDirectLoad = () => api.get('/direct-start');
   const onScnLoad = () => api.get('/scn');
   const installUk = () =>
-    api
-      .post('/profiles', { action: 'install-uk' })
-      .then((doc) => toast.ok(doc.message || 'Profile installed.'))
-      .catch((err) => toast.error(err.message));
+    call(() => api.post('/profiles', { action: 'install-uk' }), (doc) => doc.message || 'Profile installed.');
   const clearProfile = (id) =>
-    api
-      .post('/profiles', { action: 'clear', id })
-      .then((doc) => toast.ok(doc.message || 'Profile cleared.'))
-      .catch((err) => toast.error(err.message));
+    call(() => api.post('/profiles', { action: 'clear', id }), (doc) => doc.message || 'Profile cleared.');
   const writeDirectStart = (payload) =>
-    api
-      .post('/direct-start', payload)
-      .then(() => toast.ok('Profile override written.'))
-      .catch((err) => toast.error(err.message));
+    call(() => api.post('/direct-start', payload), 'Profile override written.', { raise: true });
   const scnAction = (payload) =>
-    api
-      .post('/scn', payload)
-      .then((doc) => toast.ok(doc.message || 'Done.'))
-      .catch((err) => toast.error(err.message));
+    call(() => api.post('/scn', payload), (doc) => doc.message || 'Done.');
 
   return html`<div class="grid">
     <${Balancing} readOnly=${readOnly} busy=${busy} onLoad=${onLbLoad} onWrite=${onLbWrite} />

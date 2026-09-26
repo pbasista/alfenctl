@@ -535,30 +535,27 @@ def collect(charger: AlfenCharger, sockets: int = 1) -> Status:
     return read(values, sockets)
 
 
-def render(status: Status) -> list[str]:
-    """Render a status snapshot as report lines (empty sections dropped)."""
-    lines: list[str] = []
-    if status.station_operative is False:
-        lines.append(f"  {'Station':<12} out of service")
-        lines.append("")
-    for socket in status.sockets:
-        label = f"Socket {socket.number}"
-        head = socket.main_state or "unknown"
-        if socket.operative is False:
-            head += "  (out of service)"
-        lines.append(f"  {label:<12} {head}")
-        for name, value in (
-            ("Display", socket.device_state),
-            ("Mode 3", socket.mode3_state),
-            ("LED", socket.led_state),
-            ("Power", socket.power_state),
-        ):
-            if value:
-                lines.append(f"  {'':<12} {name}: {value}")
-        if socket.error:
-            lines.append(
-                f"  {'':<12} {socket.error_severity or 'error'}: {socket.error}"
-            )
+def _socket_lines(socket: SocketStatus) -> list[str]:
+    """Render one socket: its state, then whatever else it reported."""
+    head = socket.main_state or "unknown"
+    if socket.operative is False:
+        head += "  (out of service)"
+    lines = [f"  {f'Socket {socket.number}':<12} {head}"]
+    for name, value in (
+        ("Display", socket.device_state),
+        ("Mode 3", socket.mode3_state),
+        ("LED", socket.led_state),
+        ("Power", socket.power_state),
+    ):
+        if value:
+            lines.append(f"  {'':<12} {name}: {value}")
+    if socket.error:
+        lines.append(f"  {'':<12} {socket.error_severity or 'error'}: {socket.error}")
+    return lines
+
+
+def _limit_lines(status: Status) -> list[str]:
+    """Name every current ceiling the station reported, on one line."""
     limits = [
         (name, value)
         for name, value in (
@@ -568,12 +565,14 @@ def render(status: Status) -> list[str]:
         )
         if value is not None
     ]
-    if limits:
-        lines.append("")
-        lines.append(
-            f"  {'Limits':<12} "
-            + ", ".join(f"{value:g} A {name}" for name, value in limits)
-        )
+    if not limits:
+        return []
+    joined = ", ".join(f"{value:g} A {name}" for name, value in limits)
+    return ["", f"  {'Limits':<12} {joined}"]
+
+
+def _meter_lines(status: Status) -> list[str]:
+    """Render what the meter reads now, and what it has counted since new."""
     # Delivered is what the cars took, and a charger fresh from its box
     # honestly has none of it.  Consumed is the other direction, which stays
     # at zero unless the station can send power back, so a zero there says
@@ -583,45 +582,50 @@ def render(status: Status) -> list[str]:
         energy.append(("Delivered", status.energy_delivered_kwh))
     if status.energy_consumed_kwh:
         energy.append(("Consumed", status.energy_consumed_kwh))
-    if (
-        status.voltages_v
-        or status.currents_a
-        or status.powers_w
-        or status.active_power_w is not None
-        or energy
-    ):
-        lines.append("")
-        if status.voltages_v:
-            lines.append(
-                f"  {'Voltage':<12} "
-                + " / ".join(f"{v:.1f}" for v in status.voltages_v)
-                + " V"
-            )
-        if status.currents_a:
-            lines.append(
-                f"  {'Current':<12} "
-                + " / ".join(f"{v:.1f}" for v in status.currents_a)
-                + " A"
-            )
-        if status.powers_w:
-            lines.append(
-                f"  {'Power/phase':<12} "
-                + " / ".join(f"{v / 1000:.2f}" for v in status.powers_w)
-                + " kW"
-            )
-        if status.active_power_w is not None:
-            lines.append(f"  {'Power':<12} {status.active_power_w / 1000:.2f} kW")
-        # The meter's own lifetime totals, which is what a charging session
-        # is measured against.
-        for label, total in energy:
-            lines.append(f"  {label:<12} {total:.3f} kWh")
-    if status.temperature_c is not None:
-        low, high = status.temperature_alarm
-        alarm = (
-            f"  (alarm below {low:g} or above {high:g})"
-            if None not in (low, high)
-            else ""
+    phases = [
+        (label, values, unit, scale)
+        for label, values, unit, scale in (
+            ("Voltage", status.voltages_v, "V", 1.0),
+            ("Current", status.currents_a, "A", 1.0),
+            ("Power/phase", status.powers_w, "kW", 1000.0),
         )
+        if values
+    ]
+    if not phases and status.active_power_w is None and not energy:
+        return []
+    lines = [""]
+    for label, values, unit, scale in phases:
+        places = 2 if scale != 1.0 else 1
+        joined = " / ".join(f"{v / scale:.{places}f}" for v in values)
+        lines.append(f"  {label:<12} {joined} {unit}")
+    if status.active_power_w is not None:
+        lines.append(f"  {'Power':<12} {status.active_power_w / 1000:.2f} kW")
+    # The meter's own lifetime totals, which is what a charging session
+    # is measured against.
+    lines.extend(f"  {label:<12} {total:.3f} kWh" for label, total in energy)
+    return lines
+
+
+def _temperature_lines(status: Status) -> list[str]:
+    """Render the board temperature, with the window it should stay inside."""
+    if status.temperature_c is None:
+        return []
+    low, high = status.temperature_alarm
+    alarm = (
+        f"  (alarm below {low:g} or above {high:g})" if None not in (low, high) else ""
+    )
+    return ["", f"  {'Temperature':<12} {status.temperature_c:.1f} C{alarm}"]
+
+
+def render(status: Status) -> list[str]:
+    """Render a status snapshot as report lines (empty sections dropped)."""
+    lines: list[str] = []
+    if status.station_operative is False:
+        lines.append(f"  {'Station':<12} out of service")
         lines.append("")
-        lines.append(f"  {'Temperature':<12} {status.temperature_c:.1f} C{alarm}")
+    for socket in status.sockets:
+        lines.extend(_socket_lines(socket))
+    lines.extend(_limit_lines(status))
+    lines.extend(_meter_lines(status))
+    lines.extend(_temperature_lines(status))
     return lines

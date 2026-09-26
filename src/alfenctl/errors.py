@@ -12,6 +12,10 @@ key, but :func:`alfenctl.cli.main` catches this one class, prints the
 message and exits, and the web API turns it into a 400 -- neither has to
 know the list.
 
+It derives in turn from :class:`devicectl.errors.DeviceError`, which is what
+the shared CLI and web layers catch: they need "an expected failure" and
+nothing more specific.
+
 Errors that are specifically about a *value* also derive from
 :class:`ValueError`, because that is what they are and callers already
 catch it that way.
@@ -19,8 +23,10 @@ catch it that way.
 
 from __future__ import annotations
 
+from devicectl.errors import DeviceError
 
-class AlfenError(Exception):
+
+class AlfenError(DeviceError):
     """An expected failure, reportable to the user as a single line."""
 
 

@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-
 import pytest
-
 from conftest import (
-    status_error,
     patch_charger,
+    status_error,
 )
 
 from alfenctl import cli

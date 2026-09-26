@@ -5,20 +5,10 @@
  * authorization key, the proxy password, TLS certificates.
  */
 
-import { html, } from '../vendor/preact-htm.module.js';
-import {
-  Apply,
-  EnumRow,
-  Loading,
-  NumRow,
-  PanelError,
-  putPanel,
-  TextRow,
-  ToggleRow,
-  useDraft,
-  usePanel,
-} from './panels.js';
-import { Card, Caveats, Help, Row } from './ui.js';
+import { offerWriter, useDraft } from '/core/js/drafts.js';
+import { EnumRow, NumRow, panelWait, putPanel, TextRow, ToggleRow, usePanel } from '/core/js/panels.js';
+import { Card, Caveats, Help, Row } from '/core/js/ui.js';
+import { html, } from '/core/vendor/preact-htm.module.js';
 
 
 /* One read of `/ocpp` behind three cards.
@@ -31,40 +21,38 @@ import { Card, Caveats, Help, Row } from './ui.js';
  * `Solar` established on the charging tab: the same panel key, so there
  * is still one read and one document, and a draft and an Apply each.
  */
-function useOcpp({ onLoad }) {
+function useOcpp({ onLoad, scope }) {
   /* Every hook first, and unconditionally -- see the note in
    * js/charging.js on what an early return does to hook order. */
-  const [doc, loading, error, read] = usePanel('ocpp', onLoad);
-  const edits = useDraft();
+  const panel = usePanel('ocpp', onLoad);
+  const [doc] = panel;
+  const draft = useDraft(scope);
   const live = doc?.ocpp || {};
   return {
+    panel,
     doc,
-    loading,
-    error,
-    read,
-    edits,
+    draft,
     live,
     opts: live.options || {},
-    get: (key) => edits.get(key, live[key]),
-    set: (key) => (value) => edits.set(key, value),
+    get: (key) => draft.get(key, live[key]),
+    set: (key) => (value) => draft.set(key, value),
   };
 }
 
-function sendOcpp(edits, onWrite) {
-  return () => {
-    onWrite({ ...edits.draft }).catch(() => {});
-    edits.clear();
-  };
+/* Each card is its own draft, sent to the one endpoint. */
+function offerOcpp(scope, title, { busy, readOnly, onWrite }) {
+  offerWriter(scope, { title, busy, disabled: readOnly, write: onWrite });
 }
 
 /* Where the backoffice is, and what the charger is to it. */
 function Connection({ readOnly, busy, onLoad, onWrite }) {
-  const { doc, loading, error, read, edits, live, opts, get, set } = useOcpp({ onLoad });
+  const { panel, draft, live, opts, get, set } = useOcpp({ onLoad, scope: 'ocpp:connection' });
 
-  if (error) return html`<${PanelError} error=${error} loading=${loading} onRetry=${read} title="OCPP connection" />`;
-  if (!doc) return html`<${Loading} loading=${loading} what="Reading the backoffice..." title="OCPP connection" />`;
+  const waiting = panelWait(panel, { title: 'OCPP connection', what: 'Reading the backoffice...' });
+  if (waiting !== undefined) return waiting;
 
-  return html`<${Card} title="OCPP connection">
+  offerOcpp('ocpp:connection', 'OCPP connection', { busy, readOnly, onWrite });
+  return html`<${Card} title="OCPP connection" draft=${draft}>
     <${Help} summary="An operator is chosen by applying its preset, not from this card.">
       The rows below are the connection itself -- the URL the charger dials
       and what it says on the way in -- and setting them by hand is one of
@@ -80,28 +68,31 @@ function Connection({ readOnly, busy, onLoad, onWrite }) {
       k="Back office"
       v=${live.backofficeName || '—'}
       data=${true}
-      title="the name the last applied preset left behind; it labels the connection rather than deciding it"
+      hint="the name the last applied preset left behind; it labels the connection rather than deciding it"
     />
     <${EnumRow}
+      pending=${draft.has('connectMethod')}
       k="Connect method"
       readOnly=${readOnly}
       value=${get('connectMethod')}
-      table=${opts.connectMethods}
+      table=${opts.connectMethod}
       onChange=${set('connectMethod')}
       disabled=${busy}
       includeBlank
     />
     <${EnumRow}
+      pending=${draft.has('protocol')}
       k="OCPP version"
       readOnly=${readOnly}
       value=${get('protocol')}
-      table=${Object.fromEntries((opts.protocols || []).map((p) => [p, p]))}
+      table=${Object.fromEntries((opts.protocol || []).map((p) => [p, p]))}
       kind="text"
       onChange=${set('protocol')}
       disabled=${busy}
       includeBlank
     />
     <${TextRow}
+      pending=${draft.has('wiredUrl')}
       k="Wired URL"
       readOnly=${readOnly}
       value=${readOnly
@@ -115,6 +106,7 @@ function Connection({ readOnly, busy, onLoad, onWrite }) {
     />
     ${!readOnly &&
     html`<${TextRow}
+      pending=${draft.has('wiredPath')}
       k="Wired path"
       value=${get('wiredPath')}
       live=${live.wiredPath}
@@ -124,6 +116,7 @@ function Connection({ readOnly, busy, onLoad, onWrite }) {
       disabled=${busy}
     />`}
     <${TextRow}
+      pending=${draft.has('mobileUrl')}
       k="Mobile URL"
       readOnly=${readOnly}
       value=${readOnly
@@ -136,6 +129,7 @@ function Connection({ readOnly, busy, onLoad, onWrite }) {
     />
     ${!readOnly &&
     html`<${TextRow}
+      pending=${draft.has('mobilePath')}
       k="Mobile path"
       value=${get('mobilePath')}
       live=${live.mobilePath}
@@ -144,51 +138,51 @@ function Connection({ readOnly, busy, onLoad, onWrite }) {
       disabled=${busy}
     />`}
     <${EnumRow}
+      pending=${draft.has('securityProfile')}
       k="Security profile"
       readOnly=${readOnly}
       value=${get('securityProfile')}
-      table=${opts.securityProfiles}
+      table=${opts.securityProfile}
       onChange=${set('securityProfile')}
       disabled=${busy}
       includeBlank
     />
     <${TextRow}
+      pending=${draft.has('cpoName')}
       k="CPO name"
       readOnly=${readOnly}
       value=${get('cpoName')}
       live=${live.cpoName}
       onChange=${set('cpoName')}
       disabled=${busy}
-      title="the name the charger checks the certificate against"
+      hint="the name the charger checks the certificate against"
     />
     <${Caveats}
       items=${(live.warnings || []).map((w) => ({ short: w, detail: w }))}
     />
-    ${!readOnly &&
-    html`<${Apply} edits=${edits} busy=${busy} onApply=${sendOcpp(edits, onWrite)} />`}
   <//>`;
 }
 
 /* How often the charger talks, and how hard it tries when it cannot. */
 function Timing({ readOnly, busy, onLoad, onWrite }) {
-  const { doc, loading, error, edits, live, opts, get, set } = useOcpp({ onLoad });
+  const { panel, draft, live, opts, get, set } = useOcpp({ onLoad, scope: 'ocpp:timing' });
 
   /* The connection card reports the *failure* for all three of them -- one
    * endpoint saying it three times is one endpoint shouting -- but each
    * card waits for itself.  Rendering nothing while the read is in flight
    * is what put one skeleton on this tab where four cards were coming, and
    * moved everything below them when they landed. */
-  if (error) return null;
-  if (!doc) {
-    return html`<${Loading}
-      loading=${loading}
-      what="Reading the backoffice..."
-      title="Timing and retries"
-    />`;
-  }
+  const waiting = panelWait(panel, {
+    title: 'Timing and retries',
+    what: 'Reading the backoffice...',
+    quiet: true,
+  });
+  if (waiting !== undefined) return waiting;
 
-  return html`<${Card} title="Timing and retries">
+  offerOcpp('ocpp:timing', 'Timing and retries', { busy, readOnly, onWrite });
+  return html`<${Card} title="Timing and retries" draft=${draft}>
     <${NumRow}
+      pending=${draft.has('heartbeatS')}
       k="Heartbeat"
       readOnly=${readOnly}
       value=${get('heartbeatS')}
@@ -202,6 +196,7 @@ function Timing({ readOnly, busy, onLoad, onWrite }) {
         : ''}
     />
     <${NumRow}
+      pending=${draft.has('pingPongS')}
       k="Ping/pong"
       readOnly=${readOnly}
       value=${get('pingPongS')}
@@ -212,6 +207,7 @@ function Timing({ readOnly, busy, onLoad, onWrite }) {
       disabled=${busy}
     />
     <${NumRow}
+      pending=${draft.has('meterIntervalS')}
       k="Meter interval"
       readOnly=${readOnly}
       value=${get('meterIntervalS')}
@@ -222,6 +218,7 @@ function Timing({ readOnly, busy, onLoad, onWrite }) {
       disabled=${busy}
     />
     <${NumRow}
+      pending=${draft.has('txAttempts')}
       k="Message attempts"
       readOnly=${readOnly}
       value=${get('txAttempts')}
@@ -232,6 +229,7 @@ function Timing({ readOnly, busy, onLoad, onWrite }) {
       disabled=${busy}
     />
     <${NumRow}
+      pending=${draft.has('txRetryS')}
       k="Retry interval"
       readOnly=${readOnly}
       value=${get('txRetryS')}
@@ -242,52 +240,54 @@ function Timing({ readOnly, busy, onLoad, onWrite }) {
       disabled=${busy}
     />
     <${EnumRow}
+      pending=${draft.has('statusMode')}
       k="Status notification"
       readOnly=${readOnly}
       value=${get('statusMode')}
-      table=${opts.statusModes}
+      table=${opts.statusMode}
       onChange=${set('statusMode')}
       disabled=${busy}
       includeBlank
     />
-    ${!readOnly &&
-    html`<${Apply} edits=${edits} busy=${busy} onApply=${sendOcpp(edits, onWrite)} />`}
   <//>`;
 }
 
 /* What the charger sends unprompted, and what it sends it through. */
 function Notices({ readOnly, busy, onLoad, onWrite }) {
-  const { doc, loading, error, edits, live, get, set } = useOcpp({ onLoad });
+  const { panel, draft, live, get, set } = useOcpp({ onLoad, scope: 'ocpp:notices' });
 
-  if (error) return null;
-  if (!doc) {
-    return html`<${Loading}
-      loading=${loading}
-      what="Reading the backoffice..."
-      title="Notices and proxy"
-    />`;
-  }
+  const waiting = panelWait(panel, {
+    title: 'Notices and proxy',
+    what: 'Reading the backoffice...',
+    quiet: true,
+  });
+  if (waiting !== undefined) return waiting;
 
-  return html`<${Card} title="Notices and proxy">
+  offerOcpp('ocpp:notices', 'Notices and proxy', { busy, readOnly, onWrite });
+  return html`<${Card} title="Notices and proxy" draft=${draft}>
     <${ToggleRow}
+      pending=${draft.has('sendStationStatus')}
       k="Send station status"
       value=${get('sendStationStatus')}
       onChange=${set('sendStationStatus')}
       disabled=${readOnly || busy}
     />
     <${ToggleRow}
+      pending=${draft.has('infoNotifications')}
       k="Informational notices"
       value=${get('infoNotifications')}
       onChange=${set('infoNotifications')}
       disabled=${readOnly || busy}
     />
     <${ToggleRow}
+      pending=${draft.has('proxyEnabled')}
       k="Proxy"
       value=${get('proxyEnabled')}
       onChange=${set('proxyEnabled')}
       disabled=${readOnly || busy}
     />
     <${TextRow}
+      pending=${draft.has('proxyAddress')}
       k="Proxy address"
       readOnly=${readOnly}
       value=${get('proxyAddress')}
@@ -298,6 +298,7 @@ function Notices({ readOnly, busy, onLoad, onWrite }) {
       disabled=${busy}
     />
     <${TextRow}
+      pending=${draft.has('proxyUser')}
       k="Proxy user"
       readOnly=${readOnly}
       value=${get('proxyUser')}
@@ -305,19 +306,17 @@ function Notices({ readOnly, busy, onLoad, onWrite }) {
       onChange=${set('proxyUser')}
       disabled=${busy}
     />
-    ${!readOnly &&
-    html`<${Apply} edits=${edits} busy=${busy} onApply=${sendOcpp(edits, onWrite)} />`}
   <//>`;
 }
 
 function Secrets({ readOnly, busy, api, toast }) {
-  const [doc, loading, error, read] = usePanel('secrets', () => api.get('/secrets'));
-  if (error) return html`<${PanelError} error=${error} loading=${loading} onRetry=${read} title="Secrets" />`;
-  if (!doc) {
-    return html`<${Loading} loading=${loading} what="Reading the secrets..." title="Secrets" />`;
-  }
+  const panel = usePanel('secrets', () => api.get('/secrets'));
+  const [doc] = panel;
+  const waiting = panelWait(panel, { title: 'Secrets', what: 'Reading the secrets...' });
+  if (waiting !== undefined) return waiting;
+
   const secrets = doc.secrets || [];
-  return html`<${Card} title="Secrets" width="full">
+  return html`<${Card} title="Secrets" width="full" immediate=${!readOnly}>
     <${Help} summary="Write-only: installing one replaces whatever was there.">
       The charger never reads these back, so there is nothing to compare
       against and nothing to show you afterwards. Each applies on the next

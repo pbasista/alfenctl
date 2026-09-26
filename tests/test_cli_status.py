@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import json
-
-import pytest
 from datetime import datetime, timezone
 
+import pytest
 
-from alfenctl import cli
-from alfenctl import network as net
-from alfenctl.cli.commands import network as netcmd
+from alfenctl import cli, connectivity as conn
+from alfenctl.cli.commands import connectivity as conncmd
 
 
 def test_info_mode_prints_details(capsys, fake_charger) -> None:
@@ -95,13 +93,13 @@ def _radio(fake_charger, *, enabled: int, status: int) -> None:
 @pytest.fixture(autouse=True)
 def impatient(monkeypatch):
     """Do not really wait on a fake radio: no boot to sit through, no rescan."""
-    monkeypatch.setattr(net, "RADIO_READY_TIMEOUT_S", 0.0)
-    monkeypatch.setattr(netcmd, "SCAN_RETRY_INTERVAL_S", 0.0)
+    monkeypatch.setattr(conn, "RADIO_READY_TIMEOUT_S", 0.0)
+    monkeypatch.setattr(conncmd, "SCAN_RETRY_INTERVAL_S", 0.0)
 
 
 def test_an_empty_scan_says_when_the_radio_is_off(fake_charger, capsys) -> None:
     """The commonest reason for "no networks found" is nobody listening."""
-    _radio(fake_charger, enabled=0, status=net.WIFI_DISABLED)
+    _radio(fake_charger, enabled=0, status=conn.WIFI_DISABLED)
     assert cli.main(["wifi", "scan", "--host", "1.2.3.4"]) == 0
     captured = capsys.readouterr()
     assert "No Wi-Fi networks found" in captured.out
@@ -111,7 +109,7 @@ def test_an_empty_scan_says_when_the_radio_is_off(fake_charger, capsys) -> None:
 
 
 def test_an_empty_scan_with_a_running_radio_is_left_alone(fake_charger, capsys) -> None:
-    _radio(fake_charger, enabled=1, status=net.WIFI_RUNNING)
+    _radio(fake_charger, enabled=1, status=conn.WIFI_RUNNING)
     assert cli.main(["wifi", "scan", "--host", "1.2.3.4"]) == 0
     assert "switched off" not in capsys.readouterr().err
 
@@ -119,27 +117,27 @@ def test_an_empty_scan_with_a_running_radio_is_left_alone(fake_charger, capsys) 
 def test_scan_enable_switches_the_radio_on_first(
     fake_charger, capsys, impatient
 ) -> None:
-    _radio(fake_charger, enabled=0, status=net.WIFI_DISABLED)
+    _radio(fake_charger, enabled=0, status=conn.WIFI_DISABLED)
     fake_charger.docs["/api/wifiscan"] = [
         {"Ssid": "home-net", "SignalStrength": -45, "Security": 4194308}
     ]
     assert cli.main(["wifi", "scan", "--enable", "--host", "1.2.3.4"]) == 0
-    assert any(net.P_WIFI_ENABLED in w for w in fake_charger.writes)
+    assert any(conn.P_WIFI_ENABLED in w for w in fake_charger.writes)
     assert "home-net" in capsys.readouterr().out
 
 
 def test_wifi_enable_writes_only_the_flag(fake_charger, capsys, impatient) -> None:
-    _radio(fake_charger, enabled=0, status=net.WIFI_DISABLED)
+    _radio(fake_charger, enabled=0, status=conn.WIFI_DISABLED)
     assert cli.main(["wifi", "enable", "--host", "1.2.3.4"]) == 0
-    (write,) = [w for w in fake_charger.writes if net.P_WIFI_ENABLED in w]
-    assert set(write) == {net.P_WIFI_ENABLED}
+    (write,) = [w for w in fake_charger.writes if conn.P_WIFI_ENABLED in w]
+    assert set(write) == {conn.P_WIFI_ENABLED}
 
 
 def test_an_empty_scan_is_asked_again_before_it_is_believed(
     fake_charger, capsys
 ) -> None:
     """The charger reports the survey it has, which just after a boot is none."""
-    _radio(fake_charger, enabled=1, status=net.WIFI_RUNNING)
+    _radio(fake_charger, enabled=1, status=conn.WIFI_RUNNING)
     calls: list[int] = []
 
     def scan() -> str:
@@ -161,7 +159,7 @@ def test_an_empty_scan_is_asked_again_before_it_is_believed(
 
 
 def test_one_attempt_asks_once(fake_charger, capsys) -> None:
-    _radio(fake_charger, enabled=1, status=net.WIFI_RUNNING)
+    _radio(fake_charger, enabled=1, status=conn.WIFI_RUNNING)
     calls: list[int] = []
     fake_charger.wifi_scan = lambda: (calls.append(1), '{"scan_results": []}')[1]
     assert cli.main(["wifi", "scan", "--attempts", "1", "--host", "1.2.3.4"]) == 0
@@ -170,7 +168,7 @@ def test_one_attempt_asks_once(fake_charger, capsys) -> None:
 
 def test_a_reply_that_is_not_a_scan_result_says_so(fake_charger, capsys) -> None:
     """A parser that did not understand the answer must not report an empty band."""
-    _radio(fake_charger, enabled=1, status=net.WIFI_RUNNING)
+    _radio(fake_charger, enabled=1, status=conn.WIFI_RUNNING)
     fake_charger.wifi_scan = lambda: "<html>Not found</html>"
     assert cli.main(["wifi", "scan", "--host", "1.2.3.4"]) == 0
     err = capsys.readouterr().err
@@ -180,7 +178,7 @@ def test_a_reply_that_is_not_a_scan_result_says_so(fake_charger, capsys) -> None
 def test_an_empty_band_with_a_running_radio_says_what_to_check(
     fake_charger, capsys
 ) -> None:
-    _radio(fake_charger, enabled=1, status=net.WIFI_RUNNING)
+    _radio(fake_charger, enabled=1, status=conn.WIFI_RUNNING)
     err = (cli.main(["wifi", "scan", "--host", "1.2.3.4"]), capsys.readouterr().err)[1]
     assert "5 GHz" in err and "heard nothing" in err
 

@@ -194,7 +194,7 @@ def test_read_gathers_the_temperature_alarm_band() -> None:
 
 def test_the_alarm_band_is_written_as_a_pair() -> None:
     dev = charger()
-    after = controls.apply(dev, temp_alarm_low=-20, temp_alarm_high=55)
+    after = controls.apply(dev, temp_alarm_low_c=-20, temp_alarm_high_c=55)
     written = dev.writes[0]
     assert written[controls.P_TEMPERATURE_ALARM_LOW][0] == -20.0
     assert written[controls.P_TEMPERATURE_ALARM_HIGH][0] == 55.0
@@ -204,22 +204,22 @@ def test_the_alarm_band_is_written_as_a_pair() -> None:
 def test_one_end_of_the_band_moves_on_its_own() -> None:
     """The other end comes from the charger, and still has to make sense."""
     dev = charger()
-    controls.apply(dev, temp_alarm_high=70)
+    controls.apply(dev, temp_alarm_high_c=70)
     assert controls.P_TEMPERATURE_ALARM_LOW not in dev.writes[0]
     assert dev.writes[0][controls.P_TEMPERATURE_ALARM_HIGH][0] == 70.0
 
 
 def test_an_alarm_band_the_wrong_way_round_is_refused() -> None:
     with pytest.raises(controls.ControlError):
-        controls.apply(charger(), temp_alarm_low=65)  # the high alarm is 60
+        controls.apply(charger(), temp_alarm_low_c=65)  # the high alarm is 60
     with pytest.raises(controls.ControlError):
-        controls.apply(charger(), temp_alarm_low=10, temp_alarm_high=5)
+        controls.apply(charger(), temp_alarm_low_c=10, temp_alarm_high_c=5)
 
 
 @pytest.mark.parametrize("degrees", [-100.0, 250.0])
 def test_a_temperature_no_charger_lives_at_is_refused(degrees: float) -> None:
     with pytest.raises(controls.ControlError):
-        controls.apply(charger(), temp_alarm_high=degrees)
+        controls.apply(charger(), temp_alarm_high_c=degrees)
 
 
 def test_apply_with_nothing_to_write_says_so() -> None:

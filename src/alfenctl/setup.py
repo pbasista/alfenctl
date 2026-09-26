@@ -16,6 +16,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from devicectl.progress import (
+    SECONDS_PER_DAY,
+    SECONDS_PER_HOUR,
+    SECONDS_PER_MINUTE,
+)
+
 from alfenctl.charger import AlfenCharger, LiveProperty
 from alfenctl.values import as_int
 
@@ -50,9 +56,6 @@ ALL_KEYS = (
 STATIC_BIT = 0x1
 ACTIVE_BIT = 0x2
 
-SECONDS_PER_MINUTE = 60
-SECONDS_PER_HOUR = 3600
-SECONDS_PER_DAY = 86400
 
 # `sysUpTime` counts milliseconds, whatever its name and the EDS suggest.
 #

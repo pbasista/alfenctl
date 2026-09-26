@@ -1,11 +1,18 @@
-"""``alfenctl network`` and ``alfenctl wifi`` -- where the charger is reachable.
+"""``alfenctl connectivity`` and ``alfenctl wifi`` -- where the charger is reachable.
+
+The first of these was ``network`` until the web interface had to stop calling
+its tab that.  On a page -- and in a tool -- about charging stations, a
+*network* is the charging network an operator runs them on, which is what
+``scn`` and ``ocpp`` are about; a command called ``network`` that answers with
+interface addresses sends people to the wrong one twice.  One name in both
+halves, so nobody has to know that this tool once had two.
 
 ``wifi`` used to do one thing, scan, and it still does when it is given no
 action.  What it could not do was act on what it found: the scan printed three
 ``alfenctl set`` lines for you to copy.  ``wifi connect`` writes those three
 registers itself, with the SSID and key length checked first.
 
-``network show`` is the read side for every interface at once -- Ethernet,
+``connectivity`` is the read side for every interface at once -- Ethernet,
 Wi-Fi and the modem -- which is the question ``info`` does not answer.
 
 A scan is the charger's own radio listening, so ``wifi scan`` reads the radio
@@ -27,21 +34,28 @@ import json
 import sys
 import time
 
-from alfenctl import network, wifi
+from devicectl.cli.command import Command
+
+# `conn`, not `connectivity`: this module is `commands.connectivity`, and a
+# module importing its own name is a paragraph nobody reads twice.
+from alfenctl import connectivity as conn, wifi
 from alfenctl.charger import AlfenCharger
-from alfenctl.cli.command import Command
 from alfenctl.cli.exits import EXIT_ERROR, EXIT_OK
 from alfenctl.cli.output import print_rows
+from alfenctl.errors import AlfenError
 
 
-def cmd_network(charger: AlfenCharger, args: argparse.Namespace) -> int:
+def cmd_connectivity(charger: AlfenCharger, args: argparse.Namespace) -> int:
     """Show every interface's address and state."""
-    state = network.read(charger)
+    state = conn.read(charger)
     rows = state.rows()
     if not rows:
-        print("The charger reported none of the network properties.", file=sys.stderr)
+        print(
+            "The charger reported none of the interface properties.",
+            file=sys.stderr,
+        )
         return EXIT_OK
-    print_rows("Network", rows)
+    print_rows("Connectivity", rows)
     return EXIT_OK
 
 
@@ -52,17 +66,17 @@ def _ready_radio(charger: AlfenCharger, args: argparse.Namespace) -> str | None:
     work.  Without ``--enable`` nothing is written: a charger reached over
     Ethernet has its Wi-Fi off for a reason often enough.
     """
-    state = network.read(charger)
+    state = conn.read(charger)
     obstacle = state.scan_obstacle()
     if obstacle is None or state.wifi_hardware is False or not args.enable:
         return obstacle
     print("Switching the Wi-Fi radio on...", file=sys.stderr)
-    network.enable(charger)
-    state = network.wait_for_radio(charger)
+    conn.enable(charger)
+    state = conn.wait_for_radio(charger)
     if not state.radio_ready:
         print(
             "warning: the radio is not running yet "
-            f"({network.WIFI_STATUSES.get(state.wifi_status or -1, 'unknown')}); "
+            f"({conn.WIFI_STATUSES.get(state.wifi_status or -1, 'unknown')}); "
             "scanning anyway",
             file=sys.stderr,
         )
@@ -176,7 +190,7 @@ def _scan(charger: AlfenCharger, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _report(state: network.Network) -> None:
+def _report(state: conn.Connectivity) -> None:
     """Print the Wi-Fi half of a reading, after a change to it."""
     rows = [(label, value) for label, value in state.rows() if "Ethernet" not in label]
     if rows:
@@ -193,7 +207,7 @@ def cmd_wifi(charger: AlfenCharger, args: argparse.Namespace) -> int:
             import getpass
 
             password = getpass.getpass(f"Password for {args.ssid}: ")
-        state = network.connect(
+        state = conn.connect(
             charger, args.ssid, None if args.open else password, security=args.security
         )
         # The charger takes a moment to associate, so what it reports here is
@@ -201,37 +215,36 @@ def cmd_wifi(charger: AlfenCharger, args: argparse.Namespace) -> int:
         print(f"Sent the settings for {args.ssid!r}.\n")
         _report(state)
         print(
-            "\nThe radio associates in the background; `alfenctl network show` "
+            "\nThe radio associates in the background; `alfenctl connectivity` "
             "says whether it got there.",
             file=sys.stderr,
         )
         return EXIT_OK
     if args.action == "enable":
-        if network.read(charger).wifi_hardware is False:
+        if conn.read(charger).wifi_hardware is False:
             print(
                 "error: this charger reports no Wi-Fi radio (0x328F_0 is 0)",
                 file=sys.stderr,
             )
             return EXIT_ERROR
-        network.enable(charger)
-        state = network.wait_for_radio(charger)
+        conn.enable(charger)
+        state = conn.wait_for_radio(charger)
         _report(state)
         if not state.radio_ready:
             print(
                 "\nThe radio has not reported itself running yet; "
-                "`alfenctl network` says when it does.",
+                "`alfenctl connectivity` says when it does.",
                 file=sys.stderr,
             )
         return EXIT_OK
     if args.action == "disconnect":
-        _report(network.disconnect(charger))
+        _report(conn.disconnect(charger))
         return EXIT_OK
     if args.action == "ap":
         if args.enable is None and args.start is None:
-            print("error: name --enable or --start", file=sys.stderr)
-            return EXIT_ERROR
+            raise AlfenError("name --enable or --start")
         _report(
-            network.set_access_point(
+            conn.set_access_point(
                 charger,
                 enabled=None if args.enable is None else args.enable == "on",
                 start=None if args.start is None else args.start == "on",
@@ -246,10 +259,10 @@ def add_parsers(
 ) -> None:
     """Add this group's commands to the root parser."""
     sub.add_parser(
-        "network",
+        "connectivity",
         help="show the charger's Ethernet, Wi-Fi and modem addresses",
         parents=[common],
-        description="Show where this charger is on the network. The addresses "
+        description="Show where this charger is reachable. The addresses "
         "are read-only here: writing an interface's own address is how a "
         "station is lost, so it stays an explicit `alfenctl set 207D_2 ...`.",
     )
@@ -294,7 +307,7 @@ def add_parsers(
         type=int,
         metavar="N",
         help="the security type, when the default (WPA2-AES) is wrong: "
-        + ", ".join(f"{v} ({n})" for v, n in sorted(network.SECURITY_TYPES.items())),
+        + ", ".join(f"{v} ({n})" for v, n in sorted(conn.SECURITY_TYPES.items())),
     )
     wc = wsub.add_parser(
         "enable",
@@ -314,6 +327,6 @@ def add_parsers(
 
 
 COMMANDS: dict[str, Command] = {
-    "network": Command(cmd_network),
-    "wifi": Command(cmd_wifi),
+    "connectivity": Command(cmd_connectivity, fans_out=True),
+    "wifi": Command(cmd_wifi, default_action="scan"),
 }

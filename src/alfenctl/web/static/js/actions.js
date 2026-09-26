@@ -6,8 +6,9 @@
  * percentage while they run.
  */
 
-import { html, useState } from '../vendor/preact-htm.module.js';
-import { ago, Card, Confirm, Dialog, Help } from './ui.js';
+import { usePanel } from '/core/js/panels.js';
+import { Card, Dialog, Help, span, useConfirm } from '/core/js/ui.js';
+import { html, useState } from '/core/vendor/preact-htm.module.js';
 
 const BYTES_PER_MB = 1048576;
 
@@ -15,7 +16,7 @@ function FileAction({ title, note, accept, label, disabled, onSend, extra }) {
   const [file, setFile] = useState(null);
   return html`<${Card} title=${title}>
     <p class="note">${note}</p>
-    <div class="actions-row">
+    <div class="actions">
       <input
         type="file"
         accept=${accept}
@@ -58,7 +59,7 @@ function Jobs({ jobs }) {
           </div>
           <div class="msg" style="display:flex;gap:12px">
             <span>${Math.round((job.progress || 0) * 100)}%</span>
-            <span>${ago(job.elapsed || 0)}</span>
+            <span>${span(job.elapsed || 0)}</span>
             ${job.result?.warnings?.map((w) => html`<span class="badge warn" key=${w}>${w}</span>`)}
           </div>
         </div>`
@@ -73,25 +74,21 @@ function Jobs({ jobs }) {
  * cannot be started from here.  `alfenctl firmware` can still be told to
  * install it, deliberately, from a terminal. */
 function Firmware({ onList, onInstallFile, onInstallRelease, disabled }) {
-  const [listing, setListing] = useState(null);
-  const [loading, setLoading] = useState(false);
   const [all, setAll] = useState(false);
-  const [error, setError] = useState('');
+  /* Whether anyone has asked yet.  This read goes to Alfen's servers over
+   * the internet, and nobody opening the Actions tab asked for that -- so
+   * it waits for the button, and only once it has been pressed does
+   * widening the search read the wider list by itself.  The two searches
+   * are two panel keys, so both are kept, and kept across tab switches,
+   * which is what this was losing when it held the answer in `useState`. */
+  const [asked, setAsked] = useState(false);
+  const [listing, loading, error, load] = usePanel(
+    `firmware:${all ? 'all' : 'model'}`,
+    () => onList(all),
+    { eager: asked }
+  );
   const [file, setFile] = useState(null);
-  const [confirm, setConfirm] = useState(null);
-
-  const load = async (includeAll) => {
-    setLoading(true);
-    setError('');
-    try {
-      setListing(await onList(includeAll));
-    } catch (err) {
-      setError(err.message);
-      setListing(null);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const confirm = useConfirm();
 
   const releases = listing?.releases || [];
   const best = releases.find((r) => !r.blocked && r.notes.includes('upgrade'));
@@ -105,18 +102,21 @@ function Firmware({ onList, onInstallFile, onInstallRelease, disabled }) {
     <//>
 
     <div class="toolbar">
-      <button class="btn primary" disabled=${loading} onClick=${() => load(all)}>
+      <button
+        class="btn primary"
+        disabled=${loading}
+        onClick=${() => {
+          setAsked(true);
+          load();
+        }}
+      >
         ${loading ? 'Asking Alfen...' : listing ? 'Refresh the list' : "List what Alfen publishes"}
       </button>
       <label class="toggle">
-        <input
-          type="checkbox"
-          checked=${all}
-          onChange=${(e) => {
-            setAll(e.target.checked);
-            if (listing) load(e.target.checked);
-          }}
-        />
+        <!-- The two listings are two panel keys, so widening the search
+             shows what is already known for it and asks only if it is a
+             question nobody has put yet. -->
+        <input type="checkbox" checked=${all} onChange=${(e) => setAll(e.target.checked)} />
         include other models
       </label>
       <span class="spacer"></span>
@@ -148,7 +148,7 @@ function Firmware({ onList, onInstallFile, onInstallRelease, disabled }) {
                     disabled=${disabled || release.blocked}
                     title=${release.blocked ? release.warnings.join('; ') : ''}
                     onClick=${() =>
-                      setConfirm({
+                      confirm.ask({
                         title: `Install ${release.name}?`,
                         body:
                           `It is downloaded from ${listing.source}, checked, uploaded and ` +
@@ -187,7 +187,7 @@ function Firmware({ onList, onInstallFile, onInstallRelease, disabled }) {
         class="btn"
         disabled=${disabled || !file}
         onClick=${() =>
-          setConfirm({
+          confirm.ask({
             title: `Install ${file.name}?`,
             body: `${file.name} is checked, uploaded and installed. The charger reboots and is offline for several minutes.`,
             confirmLabel: 'Upload and install',
@@ -202,16 +202,7 @@ function Firmware({ onList, onInstallFile, onInstallRelease, disabled }) {
       </button>
     </div>
 
-    ${confirm &&
-    html`<${Confirm}
-      ...${confirm}
-      onCancel=${() => setConfirm(null)}
-      onConfirm=${() => {
-        const run = confirm.run;
-        setConfirm(null);
-        run();
-      }}
-    />`}
+    ${confirm.node}
   <//>`;
 }
 
@@ -227,12 +218,14 @@ export function Actions({
   onTilt,
   onConsole,
   onConsoleList,
+  onDiagnosticSend,
+  onDiagnosticResult,
   onErase,
   readOnly,
   busy,
   toast,
 }) {
-  const [confirm, setConfirm] = useState(null);
+  const confirm = useConfirm();
   /* A station with no screen accepts the transfer and shows it nowhere, so
    * the button is not offered -- which is what the vendor's own dialog does.
    * `undefined` is "not read yet" rather than "no". */
@@ -242,10 +235,16 @@ export function Actions({
     return html`<div class="grid">
       <${Card} title="Actions">
         <div class="empty">
-          This server is running read-only, so nothing here could change the
-          charger. Start <code>alfenctl ui</code> without --read-only to use it.
+          This server is running read-only. Diagnostic results remain
+          available; start without --read-only to submit commands or make changes.
         </div>
       <//>
+      <${Diagnostics}
+        onSend=${onDiagnosticSend}
+        onResult=${onDiagnosticResult}
+        readOnly=${readOnly}
+        busy=${busy}
+      />
     </div>`;
   }
 
@@ -259,7 +258,7 @@ export function Actions({
         class="btn danger"
         disabled=${busy}
         onClick=${() =>
-          setConfirm({
+          confirm.ask({
             title: 'Restart the charger?',
             body: 'Any charging session stops and the station goes offline for a minute or two.',
             confirmLabel: 'Restart',
@@ -308,23 +307,21 @@ export function Actions({
 
     <${Console} onSend=${onConsole} onList=${onConsoleList} busy=${busy} toast=${toast} />
 
-    ${confirm &&
-    html`<${Confirm}
-      ...${confirm}
-      onCancel=${() => setConfirm(null)}
-      onConfirm=${() => {
-        const run = confirm.run;
-        setConfirm(null);
-        run();
-      }}
-    />`}
+    <${Diagnostics}
+      onSend=${onDiagnosticSend}
+      onResult=${onDiagnosticResult}
+      readOnly=${readOnly}
+      busy=${busy}
+    />
+
+    ${confirm.node}
   </div>`;
 }
 
 /* --- maintenance: tilt, console, erase -------------------------------------------------- */
 
 function Tilt({ onCalibrate, busy }) {
-  const [confirm, setConfirm] = useState(null);
+  const confirm = useConfirm();
   return html`<${Card} title="Tilt sensor">
     <${Help} summary="Stores where the charger stands right now as upright.">
       A pedestal charger reports being knocked over by comparing itself
@@ -335,7 +332,7 @@ function Tilt({ onCalibrate, busy }) {
       class="btn"
       disabled=${busy}
       onClick=${() =>
-        setConfirm({
+        confirm.ask({
           title: 'Calibrate the tilt sensor?',
           body: "The charger's current position becomes its definition of level.",
           confirmLabel: 'Calibrate',
@@ -344,29 +341,17 @@ function Tilt({ onCalibrate, busy }) {
     >
       Calibrate
     </button>
-    ${confirm &&
-    html`<${Confirm}
-      ...${confirm}
-      onCancel=${() => setConfirm(null)}
-      onConfirm=${() => {
-        const run = confirm.run;
-        setConfirm(null);
-        run();
-      }}
-    />`}
+    ${confirm.node}
   <//>`;
 }
 
 function Console({ onSend, onList, busy, toast }) {
   const [command, setCommand] = useState('');
-  /* The table, and the sentence saying why two thirds of it is blank.
-   * Both come from the server, which takes them from the CLI's own table
-   * -- the same words in the terminal and here, rather than the same
-   * words twice in two languages. */
+  /* The catalog and its firmware/SSA caveats come from the CLI's table. */
   const [commands, setCommands] = useState(null);
   const [note, setNote] = useState('');
   const [open, setOpen] = useState(false);
-  const [confirm, setConfirm] = useState(null);
+  const confirm = useConfirm();
   /* The table of known commands opens over the page rather than inside
    * the card.  In the card it was twenty-two rows of three columns
    * appearing under two controls, so the card became a row wide -- and a
@@ -379,7 +364,7 @@ function Console({ onSend, onList, busy, toast }) {
       disrupt charging or the configuration, and nothing here will stop
       you: prefer the buttons elsewhere on this page where there are any.
     <//>
-    <div class="actions-row">
+    <div class="actions">
       <input
         type="text"
         placeholder="console command"
@@ -392,7 +377,7 @@ function Console({ onSend, onList, busy, toast }) {
         class="btn"
         disabled=${busy || !command.trim()}
         onClick=${() =>
-          setConfirm({
+          confirm.ask({
             title: `Send '${command.trim()}'?`,
             body: 'The console accepts anything and validates nothing.',
             confirmLabel: 'Send',
@@ -454,21 +439,146 @@ function Console({ onSend, onList, busy, toast }) {
         </table>
       </div>
     <//>`}
-    ${confirm &&
-    html`<${Confirm}
-      ...${confirm}
-      onCancel=${() => setConfirm(null)}
-      onConfirm=${() => {
-        const run = confirm.run;
-        setConfirm(null);
-        run();
-      }}
-    />`}
+    ${confirm.node}
+  <//>`;
+}
+
+function Diagnostics({ onSend, onResult, readOnly, busy }) {
+  const [command, setCommand] = useState('');
+  const [sequenceId, setSequenceId] = useState('');
+  const [parameters, setParameters] = useState([]);
+  const confirm = useConfirm();
+  const [pending, setPending] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+  const [result, setResult] = useState(null);
+  const [open, setOpen] = useState(false);
+  const sequence = Number(sequenceId);
+  const validSequence = sequenceId !== '' && Number.isInteger(sequence) &&
+    sequence >= 0 && sequence <= 255;
+  const disabled = busy || pending;
+
+  const send = async (payload) => {
+    if (disabled || readOnly) return;
+    setPending(true);
+    setMessage('');
+    setError('');
+    setResult(null);
+    setOpen(false);
+    try {
+      const doc = await onSend(payload);
+      setMessage(doc.message);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setPending(false);
+    }
+  };
+
+  const read = async () => {
+    setPending(true);
+    setError('');
+    setResult(null);
+    setOpen(false);
+    try {
+      setResult(JSON.stringify(await onResult(), null, 2));
+      setOpen(true);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return html`<${Card} title="Diagnostics">
+    <p class="note">
+      Command names and parameters depend on the firmware. Diagnostic
+      operations may change charger state and require station authorization.
+    </p>
+    ${!readOnly && html`
+      <label class="field">
+        <span class="lab">Diagnostic command</span>
+        <input type="text" value=${command} disabled=${disabled}
+          onInput=${(e) => setCommand(e.target.value)} />
+      </label>
+      <label class="field">
+        <span class="lab">Sequence ID (0–255)</span>
+        <input type="number" min="0" max="255" step="1" required
+          value=${sequenceId} disabled=${disabled}
+          onInput=${(e) => setSequenceId(e.target.value)} />
+      </label>
+      <p class="note">
+        Parameters are optional, ordered strings. Each field is one parameter;
+        spaces and empty values are preserved. No shell quoting is needed.
+      </p>
+      ${parameters.map((value, index) => html`<div class="field">
+        <label>
+          <span class="lab">Parameter ${index}</span>
+          <input type="text" value=${value} disabled=${disabled}
+            onInput=${(e) => setParameters(parameters.map(
+              (item, at) => at === index ? e.target.value : item
+            ))} />
+        </label>
+        <button class="btn ghost" disabled=${disabled}
+          aria-label=${`Remove parameter ${index}`}
+          onClick=${() => setParameters(parameters.filter((_, at) => at !== index))}>
+          Remove
+        </button>
+      </div>`)}
+      <div class="actions">
+        <button class="btn ghost" disabled=${disabled}
+          onClick=${() => setParameters([...parameters, ''])}>Add parameter</button>
+        <button class="btn" disabled=${disabled || !command.trim() || !validSequence}
+          onClick=${() => {
+            const payload = {
+              command: command.trim(),
+              sequenceId: sequence,
+              parameters: [...parameters],
+            };
+            confirm.ask({
+              title: `Send diagnostic '${payload.command}'?`,
+              body:
+                `Sequence ID: ${payload.sequenceId}. ` +
+                `Parameters: ${JSON.stringify(payload.parameters)}. ` +
+                'Diagnostic operations may change charger state. ' +
+                'Submission does not confirm completion.',
+              confirmLabel: 'Send diagnostic',
+              run: () => send(payload),
+            });
+          }}>Send diagnostic</button>
+      </div>
+    `}
+    ${message && html`<p class="note" role="status">${message}</p>`}
+    <p class="note">
+      Read the current result separately. Match its command and sequence ID
+      and inspect the finished flag: it may describe an earlier request or
+      an operation still in progress. Results are read once, without polling.
+    </p>
+    <div class="actions">
+      <button class="btn" disabled=${disabled} onClick=${read}>Read diagnostic result</button>
+      ${result !== null && html`<button class="btn ghost"
+        onClick=${() => setOpen(true)}>View last result</button>`}
+    </div>
+    ${error && html`<p class="card-note bad" role="alert">${error}</p>`}
+    ${confirm.node}
+    ${open && html`<${Dialog}
+      title="Diagnostic result JSON"
+      width=${760}
+      onClose=${() => setOpen(false)}
+    >
+      <p class="note">
+        This is the last fetched response, not a live view. Check the command,
+        sequence ID, and finished flag before interpreting the result.
+      </p>
+      <div class="table-wrap" style="max-height:min(56vh,460px)">
+        <pre>${result}</pre>
+      </div>
+    <//>`}
   <//>`;
 }
 
 function Erase({ onErase, busy }) {
-  const [confirm, setConfirm] = useState(null);
+  const confirm = useConfirm();
   /* The target the API takes, what it is called in a sentence, and what
    * goes when it is erased. */
   const targets = [
@@ -493,7 +603,7 @@ function Erase({ onErase, busy }) {
       class="btn danger"
       disabled=${busy}
       onClick=${() =>
-        setConfirm({
+        confirm.ask({
           title: `Erase ${named}?`,
           body: `This erases ${what}.  It cannot be undone.`,
           confirmLabel: `Erase ${named}`,
@@ -504,15 +614,6 @@ function Erase({ onErase, busy }) {
       Erase ${named}
     </button>`)}
     </div>
-    ${confirm &&
-    html`<${Confirm}
-      ...${confirm}
-      onCancel=${() => setConfirm(null)}
-      onConfirm=${() => {
-        const run = confirm.run;
-        setConfirm(null);
-        run();
-      }}
-    />`}
+    ${confirm.node}
   <//>`;
 }

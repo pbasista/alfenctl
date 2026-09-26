@@ -5,51 +5,43 @@
  * master tag that always authorises, and the passwords and app PIN.
  */
 
-import { html, useEffect, useState } from '../vendor/preact-htm.module.js';
-import {
-  Apply,
-  EnumRow,
-  Loading,
-  PanelError,
-  TextRow,
-  ToggleRow,
-  useDraft,
-  usePanel,
-} from './panels.js';
-import { Card, Caveats, Confirm, Dialog, Help, Row } from './ui.js';
+import { offerWriter, useDraft } from '/core/js/drafts.js';
+import { EnumRow, Loading, PanelError, panelWait, TextRow, ToggleRow, usePanel } from '/core/js/panels.js';
+import { Card, Caveats, Dialog, Help, Row, useConfirm } from '/core/js/ui.js';
+import { html, useState } from '/core/vendor/preact-htm.module.js';
 
 
 /* --- authorization ------------------------------------------------------------ */
 
 function Authorization({ readOnly, busy, onLoad, onWrite }) {
-  const [doc, loading, error, read] = usePanel('auth', onLoad);
-  const edits = useDraft();
+  const panel = usePanel('auth', onLoad);
+  const [doc] = panel;
+  const draft = useDraft('auth');
 
-  if (error) return html`<${PanelError} error=${error} loading=${loading} onRetry=${read} title="Authorization" />`;
-  if (!doc) return html`<${Loading} loading=${loading} what="Reading authorization..." title="Authorization" />`;
+  const waiting = panelWait(panel, { title: 'Authorization', what: 'Reading authorization...' });
+  if (waiting !== undefined) return waiting;
 
-  const live = doc.authorization || {};
+const live = doc.authorization || {};
   const opts = live.options || {};
-  const get = (key) => edits.get(key, live[key]);
+  const get = (key) => draft.get(key, live[key]);
 
-  const set = (key) => (value) => edits.set(key, value);
+  const set = (key) => (value) => draft.set(key, value);
 
-  const send = () => {
-    onWrite({ ...edits.draft }).catch(() => {});
-    edits.clear();
-  };
+  offerWriter('auth', { title: 'Authorization', busy, disabled: readOnly, write: onWrite });
 
-  return html`<${Card} title="Authorization">
+  return html`<${Card} title="Authorization" draft=${draft}>
     <${EnumRow}
+      pending=${draft.has('mode')}
       k="Mode"
       readOnly=${readOnly}
       value=${get('mode')}
-      table=${opts.modes}
+      table=${opts.mode}
       onChange=${set('mode')}
       disabled=${busy}
       includeBlank
     />
     <${TextRow}
+      pending=${draft.has('plugAndChargeId')}
       k="Plug & charge id"
       readOnly=${readOnly}
       value=${get('plugAndChargeId')}
@@ -58,6 +50,7 @@ function Authorization({ readOnly, busy, onLoad, onWrite }) {
       disabled=${busy}
     />
     <${ToggleRow}
+      pending=${draft.has('whitelistEnabled')}
       k="Whitelist"
       value=${get('whitelistEnabled')}
       onChange=${set('whitelistEnabled')}
@@ -65,6 +58,7 @@ function Authorization({ readOnly, busy, onLoad, onWrite }) {
       label="consult the local tag list"
     />
     <${ToggleRow}
+      pending=${draft.has('localListEnabled')}
       k="OCPP local list"
       value=${get('localListEnabled')}
       onChange=${set('localListEnabled')}
@@ -72,37 +66,42 @@ function Authorization({ readOnly, busy, onLoad, onWrite }) {
       label="consult the backoffice's list"
     />
     <${EnumRow}
+      pending=${draft.has('offlineAction')}
       k="Offline action"
       readOnly=${readOnly}
       value=${get('offlineAction')}
-      table=${opts.offlineActions}
+      table=${opts.offlineAction}
       onChange=${set('offlineAction')}
       disabled=${busy}
       includeBlank
-      title="what to do when the backoffice cannot be reached"
+      hint="what to do when the backoffice cannot be reached"
     />
     <${EnumRow}
+      pending=${draft.has('onlineAction')}
       k="Online action"
       readOnly=${readOnly}
       value=${get('onlineAction')}
-      table=${opts.onlineActions}
+      table=${opts.onlineAction}
       onChange=${set('onlineAction')}
       disabled=${busy}
       includeBlank
     />
     <${ToggleRow}
+      pending=${draft.has('restartAfterOutage')}
       k="Restart after outage"
       value=${get('restartAfterOutage')}
       onChange=${set('restartAfterOutage')}
       disabled=${readOnly || busy}
     />
     <${ToggleRow}
+      pending=${draft.has('remoteTxRequests')}
       k="Remote start requests"
       value=${get('remoteTxRequests')}
       onChange=${set('remoteTxRequests')}
       disabled=${readOnly || busy}
     />
     <${ToggleRow}
+      pending=${draft.has('stopOnInvalidTag')}
       k="Stop on invalid tag"
       value=${get('stopOnInvalidTag')}
       onChange=${set('stopOnInvalidTag')}
@@ -111,34 +110,17 @@ function Authorization({ readOnly, busy, onLoad, onWrite }) {
     <${Caveats}
       items=${(live.warnings || []).map((w) => ({ short: w, detail: w }))}
     />
-    ${!readOnly && html`<${Apply} edits=${edits} busy=${busy} onApply=${send} />`}
   <//>`;
 }
 
 /* --- the whitelist and the master tag ----------------------------------------- */
 
 function Tags({ readOnly, busy, api, toast }) {
-  const [tags, setTags] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [confirm, setConfirm] = useState(null);
+  const [doc, loading, error, read] = usePanel('tags', () => api.get('/tags'));
+  const confirm = useConfirm();
   const [adding, setAdding] = useState(null);
+  const tags = doc?.tags ?? null;
 
-  const read = async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const doc = await api.get('/tags');
-      setTags(doc.tags);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-  useEffect(() => {
-    if (tags === null && !error) read();
-  }, []);
   if (tags === null && !error) {
     return html`<${Loading} loading=${loading} what="Reading the whitelist..." title="RFID whitelist" />`;
   }
@@ -164,6 +146,7 @@ function Tags({ readOnly, busy, api, toast }) {
 
   return html`<${Card}
     title="RFID whitelist"
+    immediate=${!readOnly}
     actions=${tags && html`<span class="badge">${tags.length} tag(s)</span>`}
   >
 
@@ -187,7 +170,7 @@ function Tags({ readOnly, busy, api, toast }) {
                         class="btn small ghost"
                         disabled=${busy}
                         onClick=${() =>
-                          setConfirm({
+                          confirm.ask({
                             title: `Remove ${t.tag}?`,
                             body: 'The tag no longer authorises a session.',
                             confirmLabel: 'Remove',
@@ -205,7 +188,7 @@ function Tags({ readOnly, busy, api, toast }) {
               )}
             </div>`}
     ${!readOnly &&
-    html`<div class="actions-row">
+    html`<div class="actions">
       <button
         class="btn"
         disabled=${busy || loading}
@@ -221,7 +204,7 @@ function Tags({ readOnly, busy, api, toast }) {
         class="btn"
         disabled=${busy}
         onClick=${() =>
-          setConfirm({
+          confirm.ask({
             title: 'Enrol the next tag presented?',
             body: 'Hold the card to the charger\'s reader now; it will be added.',
             confirmLabel: 'Start learning',
@@ -235,7 +218,7 @@ function Tags({ readOnly, busy, api, toast }) {
         class="btn danger"
         disabled=${busy}
         onClick=${() =>
-          setConfirm({
+          confirm.ask({
             title: 'Remove every tag?',
             body: 'The whole whitelist is emptied. This cannot be undone.',
             confirmLabel: 'Clear',
@@ -270,7 +253,7 @@ function Tags({ readOnly, busy, api, toast }) {
           onInput=${(e) => setAdding({ ...adding, expires: e.target.value })}
         />
       </div>
-      <div class="actions-row">
+      <div class="actions">
         <button
           class="btn primary"
           disabled=${!adding.tag.trim()}
@@ -288,34 +271,25 @@ function Tags({ readOnly, busy, api, toast }) {
       </div>
     <//>`}
 
-    ${confirm &&
-    html`<${Confirm}
-      ...${confirm}
-      onCancel=${() => setConfirm(null)}
-      onConfirm=${() => {
-        const run = confirm.run;
-        setConfirm(null);
-        run();
-      }}
-    />`}
+    ${confirm.node}
   <//>`;
 }
 
 function MasterTag({ readOnly, busy, api, toast }) {
-  const [doc, loading, error, read] = usePanel('master-tag', () => api.get('/master-tag'));
+  const panel = usePanel('master-tag', () => api.get('/master-tag'));
+  const [doc] = panel;
   const [tag, setTag] = useState('');
 
-  if (error) return html`<${PanelError} error=${error} loading=${loading} onRetry=${read} title="Master tag" />`;
-  if (!doc) {
-    return html`<${Loading} loading=${loading} what="Reading the master tag..." title="Master tag" />`;
-  }
+  const waiting = panelWait(panel, { title: 'Master tag', what: 'Reading the master tag...' });
+  if (waiting !== undefined) return waiting;
+
   const mt = doc.masterTag || {};
   if (mt.supported === false) {
     return html`<${Card} title="Master tag">
       <div class="empty">This charger does not support a master tag.</div>
     <//>`;
   }
-  return html`<${Card} title="Master tag">
+  return html`<${Card} title="Master tag" immediate=${!readOnly}>
     <p class="note">One tag that always authorises, whatever the whitelist says.</p>
 
     <div class="rows">
@@ -323,7 +297,7 @@ function MasterTag({ readOnly, busy, api, toast }) {
       <${Row} k="Tag" v=${mt.tag || '—'} data=${true} />
     </div>
     ${!readOnly &&
-    html`<div class="actions-row">
+    html`<div class="actions">
       <input
         type="text"
         placeholder="tag id"
@@ -393,7 +367,7 @@ function Passwords({ readOnly, busy, api, toast }) {
     <//>`;
   }
 
-  return html`<${Card} title="Passwords">
+  return html`<${Card} title="Passwords" immediate>
     <${Help} summary="Firmware 5.0 and later wants a unique per-charger password.">
       Update alfen.toml after changing one, so the next login can use it. A
       temporary password reverts on its own after the hours you name; the
@@ -401,7 +375,7 @@ function Passwords({ readOnly, busy, api, toast }) {
     <//>
     <div class="field">
       <span class="lab">New login password</span>
-      <div class="actions-row">
+      <div class="actions">
         <input
           type="text"
           style="width:180px"
@@ -441,7 +415,7 @@ function Passwords({ readOnly, busy, api, toast }) {
     </div>
     <div class="field">
       <span class="lab">Recovery -- the code printed on the charger</span>
-      <div class="actions-row">
+      <div class="actions">
         <input
           type="text"
           style="width:180px"
@@ -460,7 +434,7 @@ function Passwords({ readOnly, busy, api, toast }) {
     </div>
     <div class="field">
       <span class="lab">Eve Connect app PIN -- 4 to 6 digits</span>
-      <div class="actions-row">
+      <div class="actions">
         <input
           type="text"
           style="width:120px"

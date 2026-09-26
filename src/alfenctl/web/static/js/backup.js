@@ -7,8 +7,10 @@
  * firmware channel and reboot.
  */
 
-import { html, useEffect, useState } from '../vendor/preact-htm.module.js';
-import { Card, Confirm, Dialog, Help, Progress, Select } from './ui.js';
+import { download } from '/core/js/api.js';
+import { usePanel } from '/core/js/panels.js';
+import { Card, caller, Dialog, Help, Progress, Select, useConfirm } from '/core/js/ui.js';
+import { html, useState } from '/core/vendor/preact-htm.module.js';
 
 const FORMATS = [
   { value: 'json', title: "JSON (alfenctl's own)" },
@@ -21,26 +23,18 @@ function ExportCard({ busy, toast, link }) {
   const [writableOnly, setWritableOnly] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  const download = async () => {
+  /* The saving itself is `download` in /core/js/api.js -- the fetch, the
+   * filename off the reply's own `Content-Disposition`, the blob and the
+   * click.  This had written all four out, and so had the other program's
+   * settings export; the one thing that is this card's is which backup to
+   * ask for. */
+  const save = async () => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ format });
-      if (writableOnly) params.set('writableOnly', '1');
-      const response = await fetch(`/api/backup?${params.toString()}`, {
-        headers: { 'X-Alfen-UI': '1' },
+      await download('/api/backup', {
+        params: { format, writableOnly: writableOnly ? '1' : '' },
+        fallback: `charger.${format}`,
       });
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(text || response.statusText);
-      }
-      const disposition = response.headers.get('Content-Disposition') || '';
-      const match = /filename="([^"]+)"/.exec(disposition);
-      const blob = await response.blob();
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = match ? match[1] : `charger.${format}`;
-      a.click();
-      URL.revokeObjectURL(a.href);
       toast.ok('Backup downloaded.');
     } catch (err) {
       toast.error(err.message);
@@ -55,10 +49,10 @@ function ExportCard({ busy, toast, link }) {
       this. The two XML shapes are what the vendor's Windows app reads and
       writes, for moving a configuration between the two programs.
     <//>
-    <div class="actions-row">
+    <div class="actions">
       <${Select}
         value=${format}
-        onChange=${(e) => setFormat(e.target.value)}
+        onChange=${setFormat}
         entries=${FORMATS}
         disabled=${loading || busy}
       />
@@ -71,7 +65,7 @@ function ExportCard({ busy, toast, link }) {
         />
         writable only
       </label>
-      <button class="btn primary" disabled=${loading || busy} onClick=${download}>
+      <button class="btn primary" disabled=${loading || busy} onClick=${save}>
         ${loading ? 'Reading every property...' : 'Download'}
       </button>
     </div>
@@ -110,7 +104,7 @@ function RestoreCard({ readOnly, busy, api, toast }) {
       licence -- are skipped, because writing another charger's into this
       one is how a station stops being itself.
     <//>
-    <div class="actions-row">
+    <div class="actions">
       <input
         type="file"
         accept=".json,.xml,.exml,application/json,application/xml"
@@ -148,15 +142,26 @@ function RestoreCard({ readOnly, busy, api, toast }) {
           </tbody>
         </table>
       </div>
-      ${preview.skippedBound > 0 &&
+      ${preview.skippedBound?.length > 0 &&
       html`<p class="note">
-        ${preview.skippedBound} device-bound propert${preview.skippedBound === 1
+        ${preview.skippedBound.length} device-bound propert${preview.skippedBound.length === 1
           ? 'y was'
           : 'ies were'}
         skipped (serial, identity, MAC, IP, licence).
       </p>`}
+      ${preview.skippedReadOnly?.length > 0 &&
+      html`<p class="note">
+        ${preview.skippedReadOnly.length} propert${preview.skippedReadOnly.length === 1
+          ? 'y the charger will not take was'
+          : 'ies the charger will not take were'}
+        skipped (read-only).
+      </p>`}
+      ${preview.invalid?.length > 0 &&
+      html`<p class="note">
+        ${preview.invalid.map((bad) => `${bad.id}: ${bad.error}`).join('; ')}
+      </p>`}
       ${preview.errors?.length > 0 && html`<p class="note">${preview.errors.join('; ')}</p>`}
-      <div class="actions-row">
+      <div class="actions">
         <button
           class="btn primary"
           disabled=${busy || working}
@@ -233,7 +238,7 @@ function PresetPreview({ preset, doc, error, onClose, onApply, canApply }) {
                 </table>
               </div>`}
     ${canApply &&
-    html`<div class="actions-row">
+    html`<div class="actions">
       <button class="btn primary" onClick=${onApply}>Apply this preset</button>
       <button class="btn ghost" onClick=${onClose}>Close</button>
     </div>`}
@@ -241,30 +246,15 @@ function PresetPreview({ preset, doc, error, onClose, onApply, canApply }) {
 }
 
 function PresetsCard({ readOnly, busy, api, toast }) {
-  const [doc, setDoc] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const call = caller(toast);
+  const [doc, loading, error, read] = usePanel('presets', () => api.get('/presets'));
   const [search, setSearch] = useState('');
-  const [confirm, setConfirm] = useState(null);
+  const confirm = useConfirm();
   /* Which preset is open, what came back for it, and what went wrong --
    * three pieces of one thing, so one state rather than three that can
    * disagree about which preset they belong to. */
   const [showing, setShowing] = useState(null);
 
-  const read = async () => {
-    setLoading(true);
-    setError('');
-    try {
-      setDoc(await api.get('/presets'));
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-  useEffect(() => {
-    if (doc === null && !error) read();
-  }, []);
   if (doc === null && !error) {
     return html`<div class="empty">Reading presets...</div>`;
   }
@@ -278,7 +268,7 @@ function PresetsCard({ readOnly, busy, api, toast }) {
   const shown = presets.filter((p) => !p.isBackoffice || search.trim());
 
   const apply = (preset) =>
-    setConfirm({
+    confirm.ask({
       title: `Apply ${preset.label}?`,
       body: preset.isBackoffice
         ? 'This clears the current backoffice settings, uploads the preset, and needs a reboot afterwards.'
@@ -286,10 +276,7 @@ function PresetsCard({ readOnly, busy, api, toast }) {
       confirmLabel: 'Apply',
       danger: preset.isBackoffice,
       run: () =>
-        api
-          .post('/preset', { name: preset.label })
-          .then(() => toast.ok('Preset job started.'))
-          .catch((err) => toast.error(err.message)),
+        call(() => api.post('/preset', { name: preset.label }), 'Preset job started.'),
     });
 
   /* Open the preview, then fill it in.  The dialog goes up on the click
@@ -318,7 +305,7 @@ function PresetsCard({ readOnly, busy, api, toast }) {
       the current operator's settings, uploads through the firmware
       channel, and needs a reboot afterwards.
     <//>
-    <div class="actions-row">
+    <div class="actions">
       <input
         type="search"
         placeholder=${`search ${doc?.backofficeCount || 0} backoffice presets too`}
@@ -377,16 +364,7 @@ function PresetsCard({ readOnly, busy, api, toast }) {
         apply(preset);
       }}
     />`}
-    ${confirm &&
-    html`<${Confirm}
-      ...${confirm}
-      onCancel=${() => setConfirm(null)}
-      onConfirm=${() => {
-        const run = confirm.run;
-        setConfirm(null);
-        run();
-      }}
-    />`}
+    ${confirm.node}
   <//>`;
 }
 

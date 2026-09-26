@@ -38,16 +38,19 @@ jobs:
           enable-cache: true
       # --locked: a uv.lock that no longer matches pyproject.toml is a
       # mistake to report, not one to paper over with a fresh resolution.
-      - run: uv sync --locked
+      # --group browser: brings the V8 that htmcheck parses every template
+      # in.  Without it test_htmcheck skips itself -- and skips green -- so
+      # the "parsed by the real runtime" check below would not actually run.
+      - run: uv sync --locked --group browser
       - run: uv run ruff format --check .
       - run: uv run ruff check .
       - run: uv run ty check
-      - run: uv run python tools/htmcheck.py
       - run: uv run pytest
 
   # Biome is one native binary and needs no Node; it lints the browser half
-  # once, not once per Python version.  `tools/frontlint.py` runs above, in
-  # the test job, and checks what Biome cannot: the wiring between modules.
+  # once, not once per Python version.  The cross-file checks Biome cannot
+  # make -- the wiring between modules, and every template parsed by the real
+  # runtime -- run above in the test job, out of `devicectl.devtools`.
   frontend:
     if: >-
       github.event_name != 'pull_request' ||

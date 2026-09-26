@@ -8,12 +8,35 @@ Every station command accepts:
 
 | Option | Meaning |
 | --- | --- |
-| `--station NAME` | station name from `alfen.toml`, its Object ID (serial), or its IP (via mDNS) |
+| `--station NAME` | station name from `alfen.toml`, its Object ID (serial), or its IP (via mDNS). A comma-separated list, or `all` for every station in `alfen.toml`, runs a **read** over each (see below) |
 | `--host IP`, `--port N`, `--http` | target a charger directly instead of mDNS (`--http` for pre-5.0 chargers) |
 | `-u`, `-p` | charger login credentials (default: the old-generation `cpadmin` / `L@0Pa$$`) |
 | `--config FILE` | settings file (default: the path `alfenctl config path` prints) |
 | `--discover-time S` | seconds to browse for stations (default 4) |
 | `--debug` | log every HTTP request/response to stderr |
+
+### Several stations at once
+
+The commands that only read take a list: `status`, `info`, `doctor`,
+`props`/`ls`, `get`, `connectivity`, and the `show`/`list`/`status` action of
+`auth`, `ocpp`, `loadbalancing`, `current`, `brightness`, `socket`,
+`license`, `time`, `scn`, `tags`, `meter-map`, `charging-profiles` and
+`direct-start`.
+
+One station prints exactly as it always did. Several get a `=== name ===`
+heading each, and `--json` comes back as one object keyed by station name
+rather than several documents in a row. They are read sequentially, each in
+its own session; a station that does not answer is reported under its own
+heading and the rest are still read, with the exit code of the first
+failure.
+
+`all` means the stations `alfen.toml` names, and not whatever mDNS can see
+-- a browse finds chargers that may not be yours. `--host` names one
+address, so `--host` with a list of stations is an error rather than a
+guess.
+
+A command that writes takes one station at a time: each of them wants its
+own preview and its own confirmation.
 
 `ui` takes `--listen ADDR` (a port, a host, or `HOST:PORT`; default
 `127.0.0.1:8088`), `--read-only`, `--token`/`--no-token`, `--allow-host NAME`,
@@ -55,15 +78,24 @@ file without asking); `firmware` takes `--new-password` (the 5.0 boundary),
   (family, signature, container integrity) server-side.
 * Interrupting during an upload is safe: nothing is flashed until the
   complete image has been accepted.
-* `cmd` is the charger's own console, unvalidated: it accepts anything and
-  reports what it did only in its event log, so `cmd` prints no result of
-  its own. `cmd --list` prints everything the three reverse-engineered
-  sources record about it: the Windows app sends five commands (`reboot`,
-  `txerase`, `date <timestamp>`, `eepromx erase config` and
-  `forcefirmwarepermanent`), a real NG910 log shows a sixth (`cansync off`)
-  that appears in no app, and My Eve names nineteen more without ever
-  recording the string behind them. A blank command column therefore means
-  unknown, not unavailable — and `reboot`/`erase` wrap the useful ones.
+* `cmd` submits free-form text to the charger's console. `cmd --list` and
+  the web console share a catalog of command strings documented in vendor
+  clients and an NG910 log, including `flash-info` and `flash-dump`.
+  MyEve limits advanced choices to the station's Secure Service Access
+  (SSA) login role, which is separate from owner/admin access. In reported
+  NG910-60027 operation, these two flash commands produced no observable
+  action or log output. Command availability and authorization depend on
+  the installed firmware. HTTP success acknowledges submission rather than
+  execution; inspect the log for command output. Dumps may contain sensitive
+  data, and erase, test, reset, and tamper commands can disrupt charging or
+  configuration.
+* `diag send` submits a firmware-specific diagnostic through `/api/diagtool`
+  after confirmation (`-y` skips the prompt). `diag result` reads the current
+  result once and prints the response JSON. Match its command and sequence
+  ID and inspect its finished flag: it may describe an earlier request or
+  an operation still in progress. The inspected clients define the transport
+  without a diagnostic command catalog; command names, parameters, and result
+  formats depend on the firmware.
 * `erase settings` returns the charger to factory defaults *including its
   network configuration*, so you can lose contact with it; it takes effect
   on the next reboot.
@@ -119,11 +151,31 @@ file without asking); `firmware` takes `--new-password` (the 5.0 boundary),
   charger's own API. Installing one is therefore unverifiable from here:
   the charger answers HTTP 200 to a well-formed request whether or not the
   value is the one your backoffice expects.
-* Not implemented from the Windows app, on purpose: everything that goes
-  through Alfen's own service back end rather than the charger — updating a
-  license key from their server, assigning an object id, loading settings
-  from ISAH — since all of it needs an Alfen service account, and the app's
-  own updater. The SCN live roster (a UDP broadcast every member sends) is
+* `cloud` reaches Alfen's own servers rather than the charger, to read what
+  they hold about a station (account, warranty, how many changes Alfen has
+  logged for it, the license key on file, and — with `cloud info --defaults`
+  — the full factory-default property profile, which is every property value
+  the manufacturer keeps for the station) and — on `cloud license --install`
+  — to write that key to the charger. It
+  follows the **My Eve** mobile back end, because that is the account an owner
+  has: it signs in through Alfen's Azure AD B2C tenant, which yields a bearer
+  token, then calls one GraphQL endpoint. There is no username/password
+  (ROPC) grant, so alfenctl never handles the Alfen password: `cloud login`
+  opens Alfen's own login page in a browser and catches the resulting code on
+  a one-shot local loopback server (the client registers a `localhost`
+  redirect and B2C accepts it on any port), so it finishes on its own with
+  nothing to paste, or you supply a token with `--token`/`$ALFEN_CLOUD_TOKEN`.
+  `cloud logout` forgets the cached token, so a different account can sign in.
+  The manufacturer holds nothing else about a station: the `getLocation*`
+  operations in the app are geocoding helpers that turn an address the user
+  types into coordinates, not station data, so they are not wrapped. The live
+  token exchange and GraphQL calls are the one part not exercised by the test
+  suite (which drives them through a mock), and the operation/field names are
+  reconstructed from the decompiled app; if Alfen has changed them, a query
+  may need adjusting. This is the piece of the vendors' service back end
+  worth having; the rest is still left out on purpose — assigning an object
+  id and loading settings from **ISAH** need the Windows installer's own
+  service account, not a My Eve one. The SCN live roster (a UDP broadcast every member sends) is
   a separate deliberate choice, explained in
   [how-it-works.md](how-it-works.md). Also skipped: reordering
   SCN members by socket id (the app swaps two stations' ids to change load

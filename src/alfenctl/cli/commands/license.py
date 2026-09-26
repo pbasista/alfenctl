@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from typing import Any
 
-from alfenctl.charger import AlfenCharger, ChargerInfo
+from devicectl.cli.command import Command
 
-from alfenctl.cli.command import Command
-from alfenctl.cli.exits import EXIT_ERROR, EXIT_OK
+from alfenctl.charger import AlfenCharger, ChargerInfo
+from alfenctl.cli.exits import EXIT_OK
 
 
 def license_fields(info: ChargerInfo, lic: Any) -> list[tuple[str, object]]:
@@ -66,15 +65,10 @@ def _cmd_license_show(charger: AlfenCharger, args: argparse.Namespace) -> int:
 def _cmd_license_set(charger: AlfenCharger, args: argparse.Namespace) -> int:
     from alfenctl.license import (
         PROP_LICENSE_KEY,
-        LicenseKeyError,
         normalize_license_key,
     )
 
-    try:
-        key = normalize_license_key(args.key)
-    except LicenseKeyError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return EXIT_ERROR
+    key = normalize_license_key(args.key)
     charger.write_properties({PROP_LICENSE_KEY: (key, None)})
     print(f"License key set to {key}.")
     print(
@@ -105,5 +99,5 @@ def add_parsers(
 
 
 COMMANDS: dict[str, Command] = {
-    "license": Command(cmd_license),
+    "license": Command(cmd_license, default_action="show", fans_out=("show",)),
 }

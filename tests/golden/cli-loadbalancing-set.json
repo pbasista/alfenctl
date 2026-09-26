@@ -1,0 +1,225 @@
+[
+  {
+    "flags": [
+      "--static"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": null,
+    "choices": [
+      "on",
+      "off"
+    ],
+    "default": null,
+    "required": false,
+    "help": "static load balancing"
+  },
+  {
+    "flags": [
+      "--active"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": null,
+    "choices": [
+      "on",
+      "off"
+    ],
+    "default": null,
+    "required": false,
+    "help": "active load balancing"
+  },
+  {
+    "flags": [
+      "--protocol"
+    ],
+    "action": "_StoreAction",
+    "type": "int",
+    "metavar": "N",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "smart meter protocol: -1 (EMS), 4 (Modbus TCP/IP), 5 (DSMR 4.x / SMR 5.0 (P1)), 6 (Modbus RTU), 7 (TIC (Linky))"
+  },
+  {
+    "flags": [
+      "--data-source"
+    ],
+    "action": "_StoreAction",
+    "type": "int",
+    "metavar": "N",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "what active balancing follows: 0 (meter), 1 (meter and EMS), 3 (EMS)"
+  },
+  {
+    "flags": [
+      "--max-meter-current"
+    ],
+    "action": "_StoreAction",
+    "type": "float",
+    "metavar": "AMPS",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "the grid connection's limit"
+  },
+  {
+    "flags": [
+      "--safe-current"
+    ],
+    "action": "_StoreAction",
+    "type": "float",
+    "metavar": "AMPS",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "what to fall back to when the meter stops answering"
+  },
+  {
+    "flags": [
+      "--max-imbalance"
+    ],
+    "action": "_StoreAction",
+    "type": "float",
+    "metavar": "AMPS",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "allowed imbalance between phases"
+  },
+  {
+    "flags": [
+      "--includes-ev"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": null,
+    "choices": [
+      "on",
+      "off"
+    ],
+    "default": null,
+    "required": false,
+    "help": "whether the meter's reading already counts the charging car"
+  },
+  {
+    "flags": [
+      "--phase-rotation"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": null,
+    "choices": [
+      "L1",
+      "L2",
+      "L3",
+      "L1L2L3",
+      "L1L3L2",
+      "L2L1L3",
+      "L2L3L1",
+      "L3L1L2",
+      "L3L2L1"
+    ],
+    "default": null,
+    "required": false,
+    "help": "how the phases are wired to this station"
+  },
+  {
+    "flags": [
+      "--max-phases"
+    ],
+    "action": "_StoreAction",
+    "type": "int",
+    "metavar": null,
+    "choices": [
+      "1",
+      "3"
+    ],
+    "default": null,
+    "required": false,
+    "help": "the most phases a session may use"
+  },
+  {
+    "flags": [
+      "--phase-switching"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": null,
+    "choices": [
+      "on",
+      "off"
+    ],
+    "default": null,
+    "required": false,
+    "help": "allow 1-/3-phase switching"
+  },
+  {
+    "flags": [
+      "--solar-mode"
+    ],
+    "action": "_StoreAction",
+    "type": "int",
+    "metavar": "N",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "solar charging: 0 (off), 1 (comfort), 2 (green)"
+  },
+  {
+    "flags": [
+      "--green-share"
+    ],
+    "action": "_StoreAction",
+    "type": "int",
+    "metavar": "PERCENT",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "surplus share to charge from"
+  },
+  {
+    "flags": [
+      "--comfort-level"
+    ],
+    "action": "_StoreAction",
+    "type": "int",
+    "metavar": "WATTS",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "the floor comfort mode keeps"
+  },
+  {
+    "flags": [
+      "--solar-boost"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": null,
+    "choices": [
+      "on",
+      "off"
+    ],
+    "default": null,
+    "required": false,
+    "help": "charge this session anyway, whatever the roof is making"
+  },
+  {
+    "flags": [
+      "--socket"
+    ],
+    "action": "_StoreAction",
+    "type": "int",
+    "metavar": "N",
+    "choices": [
+      "1",
+      "2"
+    ],
+    "default": null,
+    "required": false,
+    "help": "only this socket, for --solar-boost (default: every socket)"
+  }
+]

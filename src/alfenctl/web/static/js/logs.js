@@ -11,8 +11,8 @@
  * charger's buffer goes rather than showing only the newest page.
  */
 
-import { html, useEffect, useRef, useState } from '../vendor/preact-htm.module.js';
-import { Progress, Select } from './ui.js';
+import { Progress, Select } from '/core/js/ui.js';
+import { html, useEffect, useRef, useState } from '/core/vendor/preact-htm.module.js';
 
 const KINDS = ['', 'ERROR', 'WARNING', 'INFO', 'USER', 'CHARGING'];
 
@@ -74,8 +74,7 @@ export function Logs({ lines, follow, onFollow, onReload, onSince, busy, loading
       <${Select}
         value=${span}
         disabled=${loading}
-        onChange=${(event) => {
-          const asked = event.target.value;
+        onChange=${(asked) => {
           setSpan(asked);
           if (asked) onSince(asked);
         }}
@@ -87,7 +86,7 @@ export function Logs({ lines, follow, onFollow, onReload, onSince, busy, loading
       </label>
       <${Select}
         value=${kind}
-        onChange=${(e) => setKind(e.target.value)}
+        onChange=${setKind}
         entries=${KINDS.map((name) => ({ value: name, title: name || 'every kind' }))}
       />
       <input

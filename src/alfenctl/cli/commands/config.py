@@ -12,12 +12,12 @@ import argparse
 import sys
 from pathlib import Path
 
-from alfenctl.charger import AlfenCharger
-from alfenctl.config import EXAMPLE_CONFIG, default_config_path, load_config
+from devicectl.cli.command import Command, Need
 
-from alfenctl.cli.command import Command, Need
+from alfenctl.charger import AlfenCharger
 from alfenctl.cli.exits import EXIT_ERROR, EXIT_OK
-from alfenctl.cli.output import confirm, print_table
+from alfenctl.cli.output import may_overwrite, print_table
+from alfenctl.config import EXAMPLE_CONFIG, default_config_path, load_config
 
 # Stand-in for a password, so `config show` can be pasted into a bug report.
 REDACTED = "<set>"
@@ -36,8 +36,7 @@ def cmd_config(charger: AlfenCharger | None, args: argparse.Namespace) -> int:
 
 def _init(path: Path, *, yes: bool) -> int:
     """Write a commented starter file, and say what to do with it."""
-    if path.exists() and not yes and not confirm(f"'{path}' already exists. Replace?"):
-        print("Aborted.", file=sys.stderr)
+    if not may_overwrite(path, yes=yes):
         return EXIT_ERROR
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(EXAMPLE_CONFIG, encoding="utf-8")
@@ -107,4 +106,6 @@ def add_parsers(
     )
 
 
-COMMANDS: dict[str, Command] = {"config": Command(cmd_config, needs=Need.NOTHING)}
+COMMANDS: dict[str, Command] = {
+    "config": Command(cmd_config, needs=Need.NOTHING, default_action="show")
+}

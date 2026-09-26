@@ -9,9 +9,10 @@ from __future__ import annotations
 import argparse
 import sys
 
+from devicectl.cli.command import Command
+
 from alfenctl import controls, status
 from alfenctl.charger import AlfenCharger
-from alfenctl.cli.command import Command
 from alfenctl.cli.exits import EXIT_ERROR, EXIT_OK
 from alfenctl.cli.output import confirm, print_rows
 
@@ -241,7 +242,7 @@ def add_parsers(
 
 
 COMMANDS: dict[str, Command] = {
-    "current": Command(cmd_current),
-    "brightness": Command(cmd_brightness),
-    "socket": Command(cmd_socket),
+    "current": Command(cmd_current, default_action="show", fans_out=("show",)),
+    "brightness": Command(cmd_brightness, default_action="show", fans_out=("show",)),
+    "socket": Command(cmd_socket, default_action="show", fans_out=("show",)),
 }

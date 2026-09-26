@@ -35,6 +35,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Callable, Iterable, Protocol, Sequence
 
+from devicectl.progress import SECONDS_PER_HOUR
+
 # Where the app starts paging: "the newest record" (ICUTransactions.Read).
 NEWEST_OFFSET = 0xFFFFFFFF
 # Hard cap on pages, so a charger that ignores `offset` can't spin us.
@@ -42,7 +44,6 @@ MAX_PAGES = 2000
 # The charger says this when there is nothing to report.
 EMPTY_MARKER = "empty transaction database"
 
-SECONDS_PER_HOUR = 3600
 
 # ICUTransactionStopReason
 STOP_REASONS = {
@@ -288,6 +289,145 @@ def _body(text: str) -> str:
     return text.split(":", 1)[1].strip() if ":" in text else ""
 
 
+# --- one parser per record kind ------------------------------------------------------------
+# Every line in the database is ``<offset>_<prefix>: <body>``, and the prefix
+# says both what kind of thing happened and how the body is laid out.  Each
+# shape gets a function of its own below and an entry in :data:`PARSERS`; a
+# prefix nobody has seen leaves the record ``unknown`` with its text intact,
+# which is what the CLI prints for it.
+#
+# Each parser is handed a record that already knows its offset, kind and raw
+# text, and fills in what it can.  A body too short for its shape is a record
+# that stays half-filled rather than one that is thrown away: a truncated
+# line still says a session happened.
+
+
+def _parse_tx(record: Record, body: str) -> None:
+    """``tx``: a whole session, start half and stop half in one line."""
+    fields = [f.strip() for f in body.split(",")]
+    if len(fields) < _TX_FIELDS_MIN:
+        return
+    _head(record, f"{fields[0]},{fields[1]}")
+    _start_fields(record, fields[2])
+    if len(fields) >= _TX_FIELDS_WITH_STOP:
+        _stop_fields(record, fields[3])
+
+
+def _parse_txstart(record: Record, body: str) -> None:
+    """``txstart``/``txstart2``: the start half on its own."""
+    fields = [f.strip() for f in body.split(",")]
+    if len(fields) < _TX_FIELDS_MIN:
+        return
+    _head(record, f"{fields[0]},{fields[1]}")
+    _start_fields(record, fields[2])
+
+
+def _parse_txstop(record: Record, body: str) -> None:
+    """``txstop``/``txstop2``: the stop half on its own."""
+    fields = [f.strip() for f in body.split(",")]
+    if len(fields) < _TX_FIELDS_MIN:
+        return
+    _head(record, f"{fields[0]},{fields[1]}")
+    _stop_fields(record, fields[2])
+
+
+def _socket_of(text: str) -> int | None:
+    """Read a ``socket1,``-style field as a number, or None."""
+    digits = text.strip(",")
+    return int(digits) if digits.isdigit() else None
+
+
+def _parse_meter_value(record: Record, body: str) -> None:
+    """``mv``: one meter reading, and whether it has reached the backoffice."""
+    parts = body.split()
+    if len(parts) < _MV_MIN:
+        return
+    record.socket = _socket_of(parts[1])
+    record.start_time = _timestamp(f"{parts[2]} {parts[3]}")
+    record.start_meter_kwh = _meter(parts[4])
+    record.start_to_send = _flag(parts[-1])
+    if parts[-2].lower() in ("start", "stop", "regular"):
+        record.extra = parts[-2].lower()
+
+
+def _parse_status(record: Record, body: str) -> None:
+    """``sn``/``sn3``: a status notification, with a free-text middle."""
+    parts = body.split()
+    if parts and parts[0] == ":":  # some firmware doubles the separator
+        parts = parts[1:]
+    if len(parts) < _SN_MIN:
+        return
+    record.socket = _socket_of(parts[1])
+    record.start_time = _timestamp(f"{parts[2]} {parts[3]}")
+    # Whatever sits between the timestamp and the three trailing OCPP fields
+    # is the notification's own words, and there is no telling how many.
+    middle = " ".join(p.strip(",") for p in parts[6:-3])
+    record.extra = " ".join(
+        x for x in (parts[4].strip(","), parts[5].strip(","), middle) if x
+    ).strip()
+    if len(parts) >= _SN_WITH_OCPP2:
+        record.trigger_reason = _enum(TRIGGER_REASONS, parts[-3])
+        record.charging_state = _enum(CHARGING_STATES, parts[-2])
+
+
+def _parse_reservation(record: Record, body: str) -> None:
+    """``rs``: a reservation made against a socket."""
+    parts = body.split()
+    if len(parts) < _RS_MIN:
+        return
+    if parts[0].startswith("#") and parts[0][1:].isdigit():
+        record.transaction_id = int(parts[0][1:])
+    record.start_tag = _tag(parts[2])
+    record.socket = _socket_of(parts[5])
+    record.start_time = _timestamp(f"{parts[7]} {parts[8]}")
+
+
+def _parse_reservation_status(record: Record, body: str) -> None:
+    """``rss``: what became of a reservation."""
+    parts = body.split()
+    if len(parts) < _RSS_MIN:
+        return
+    ident = parts[0].strip(" :")
+    if ident.isdigit():
+        record.transaction_id = int(ident)
+    record.reservation_status = _enum(RESERVATION_STATUSES, parts[1])
+    record.start_to_send = _flag(parts[2].strip("()"))
+
+
+def _parse_security_event(record: Record, body: str) -> None:
+    """``se``: a security event, in the OCPP 1.6 security profile's sense."""
+    parts = body.split()
+    if len(parts) < _SE_MIN:
+        return
+    record.start_time = _timestamp(f"{parts[0]} {parts[1].strip(': ')}")
+    record.security_event = _enum(SECURITY_EVENTS, parts[2])
+    record.start_to_send = _flag(parts[3].strip("()"))
+
+
+def _parse_clock_offset(record: Record, body: str) -> None:
+    """``dto``: the charger's clock jumped, by this many seconds."""
+    try:
+        record.extra = str(timedelta(seconds=int(body)))
+    except ValueError:
+        record.extra = body
+
+
+PARSERS: dict[str, tuple[str, Callable[[Record, str], None]]] = {
+    "tx": ("transaction", _parse_tx),
+    "txstart": ("start", _parse_txstart),
+    "txstart2": ("start", _parse_txstart),
+    "txstop": ("stop", _parse_txstop),
+    "txstop2": ("stop", _parse_txstop),
+    "mv": ("meter-value", _parse_meter_value),
+    "sn": ("status", _parse_status),
+    "sn3": ("status", _parse_status),
+    "rs": ("reservation", _parse_reservation),
+    "rss": ("reservation-status", _parse_reservation_status),
+    "se": ("security-event", _parse_security_event),
+    "dto": ("clock-offset", _parse_clock_offset),
+}
+
+
 def parse_record(line: str) -> Record | None:
     """Parse one ``<offset>_<text>`` line; return None for a blank one."""
     stripped = line.strip()
@@ -300,92 +440,10 @@ def parse_record(line: str) -> Record | None:
         return None
     text = text.strip()
     record = Record(offset=offset, kind="unknown", raw=text)
-    prefix = text.split(":", 1)[0]
-    body = _body(text)
-    if prefix == "tx":
-        record.kind = "transaction"
-        fields = [f.strip() for f in body.split(",")]
-        if len(fields) < _TX_FIELDS_MIN:
-            return record
-        _head(record, f"{fields[0]},{fields[1]}")
-        _start_fields(record, fields[2])
-        if len(fields) >= _TX_FIELDS_WITH_STOP:
-            _stop_fields(record, fields[3])
-    elif prefix in ("txstart", "txstart2"):
-        record.kind = "start"
-        fields = [f.strip() for f in body.split(",")]
-        if len(fields) < _TX_FIELDS_MIN:
-            return record
-        _head(record, f"{fields[0]},{fields[1]}")
-        _start_fields(record, fields[2])
-    elif prefix in ("txstop", "txstop2"):
-        record.kind = "stop"
-        fields = [f.strip() for f in body.split(",")]
-        if len(fields) < _TX_FIELDS_MIN:
-            return record
-        _head(record, f"{fields[0]},{fields[1]}")
-        _stop_fields(record, fields[2])
-    elif prefix == "mv":
-        record.kind = "meter-value"
-        parts = body.split()
-        if len(parts) >= _MV_MIN:
-            record.socket = (
-                int(parts[1].strip(",")) if parts[1].strip(",").isdigit() else None
-            )
-            record.start_time = _timestamp(f"{parts[2]} {parts[3]}")
-            record.start_meter_kwh = _meter(parts[4])
-            record.start_to_send = _flag(parts[-1])
-            if parts[-2].lower() in ("start", "stop", "regular"):
-                record.extra = parts[-2].lower()
-    elif prefix in ("sn", "sn3"):
-        record.kind = "status"
-        parts = body.split()
-        if parts and parts[0] == ":":  # some firmware doubles the separator
-            parts = parts[1:]
-        if len(parts) >= _SN_MIN:
-            record.socket = (
-                int(parts[1].strip(",")) if parts[1].strip(",").isdigit() else None
-            )
-            record.start_time = _timestamp(f"{parts[2]} {parts[3]}")
-            middle = " ".join(p.strip(",") for p in parts[6 : len(parts) - 3])
-            record.extra = " ".join(
-                x for x in (parts[4].strip(","), parts[5].strip(","), middle) if x
-            ).strip()
-            if len(parts) >= _SN_WITH_OCPP2:
-                record.trigger_reason = _enum(TRIGGER_REASONS, parts[-3])
-                record.charging_state = _enum(CHARGING_STATES, parts[-2])
-    elif prefix == "rs":
-        record.kind = "reservation"
-        parts = body.split()
-        if len(parts) >= _RS_MIN:
-            if parts[0].startswith("#") and parts[0][1:].isdigit():
-                record.transaction_id = int(parts[0][1:])
-            record.start_tag = _tag(parts[2])
-            if parts[5].strip(",").isdigit():
-                record.socket = int(parts[5].strip(","))
-            record.start_time = _timestamp(f"{parts[7]} {parts[8]}")
-    elif prefix == "rss":
-        record.kind = "reservation-status"
-        parts = body.split()
-        if len(parts) >= _RSS_MIN:
-            ident = parts[0].strip(" :")
-            if ident.isdigit():
-                record.transaction_id = int(ident)
-            record.reservation_status = _enum(RESERVATION_STATUSES, parts[1])
-            record.start_to_send = _flag(parts[2].strip("()"))
-    elif prefix == "se":
-        record.kind = "security-event"
-        parts = body.split()
-        if len(parts) >= _SE_MIN:
-            record.start_time = _timestamp(f"{parts[0]} {parts[1].strip(': ')}")
-            record.security_event = _enum(SECURITY_EVENTS, parts[2])
-            record.start_to_send = _flag(parts[3].strip("()"))
-    elif prefix == "dto":
-        record.kind = "clock-offset"
-        try:
-            record.extra = str(timedelta(seconds=int(body)))
-        except ValueError:
-            record.extra = body
+    known = PARSERS.get(text.split(":", 1)[0])
+    if known is not None:
+        record.kind, parse = known
+        parse(record, _body(text))
     return record
 
 

@@ -1,0 +1,28 @@
+[
+  {
+    "dest": "level",
+    "flags": [],
+    "action": "_StoreAction",
+    "type": "int",
+    "metavar": "PERCENT",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "brightness in percent (0-100)"
+  },
+  {
+    "flags": [
+      "--auto"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": null,
+    "choices": [
+      "on",
+      "off"
+    ],
+    "default": null,
+    "required": false,
+    "help": "whether the charger dims itself when nothing is happening"
+  }
+]

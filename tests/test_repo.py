@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from devicectl.report import Reporter
 
 import alfenctl.repo as repo_mod
 from alfenctl.charger import ChargerInfo
@@ -404,22 +405,46 @@ def _remote(name: str, data: bytes) -> RemoteFirmware:
     return repo_mod._to_remote(name, len(data), datetime(2026, 7, 31, 7, 15))
 
 
+class Recorder(Reporter):
+    """Keeps what a download said, so nothing has to be captured off stdout."""
+
+    def __init__(self) -> None:
+        self.said: list[str] = []
+        self.sent: list[tuple[int, int, str]] = []
+
+    def step(self, message: str) -> None:
+        self.said.append(message)
+
+    def detail(self, message: str) -> None:
+        self.said.append(message)
+
+    def sending(self, sent, total, elapsed_s, label="") -> None:
+        self.sent.append((sent, total, label))
+
+
 def test_download_writes_into_the_cache(fake_ftp, tmp_path: Path, capsys) -> None:
     fw = _remote("NG9xx 7.4.5-4415.fwi", b"image-bytes" * 100)
-    path = download(fw, "NG", cache_dir=tmp_path)
+    report = Recorder()
+    path = download(fw, "NG", cache_dir=tmp_path, report=report)
     assert path == tmp_path / "NG9xx 7.4.5-4415.fwi"
     assert path.read_bytes() == b"image-bytes" * 100
     assert int(path.stat().st_mtime) == int(fw.modified.timestamp())
-    assert "Downloading" in capsys.readouterr().out
+    assert any("Downloading" in line for line in report.said)
+    assert report.sent[-1][:2] == (len(b"image-bytes" * 100), fw.size)
+    # A domain module that prints cannot be driven from a browser; nothing
+    # here reaches a terminal unless a terminal asked for it.
+    assert capsys.readouterr() == ("", "")
 
 
 def test_download_reuses_a_cached_copy(fake_ftp, tmp_path: Path, capsys) -> None:
     fw = _remote("NG9xx 7.4.5-4415.fwi", b"x" * 64)
     download(fw, "NG", cache_dir=tmp_path)
     fake_ftp.connections = 0
-    download(fw, "NG", cache_dir=tmp_path)
+    report = Recorder()
+    download(fw, "NG", cache_dir=tmp_path, report=report)
     assert fake_ftp.connections == 0  # no second transfer
-    assert "cached copy" in capsys.readouterr().out
+    assert any("cached copy" in line for line in report.said)
+    assert capsys.readouterr() == ("", "")
 
 
 def test_download_refetches_a_truncated_cached_copy(fake_ftp, tmp_path: Path) -> None:

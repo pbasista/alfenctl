@@ -5,9 +5,9 @@ from __future__ import annotations
 import sys
 
 import pytest
+from devicectl.report import Wait
 
 from alfenctl.cli.report import TerminalReporter
-from alfenctl.report import Wait
 
 
 def _wait(**kw) -> Wait:
@@ -31,8 +31,8 @@ def tty(monkeypatch):
     """
     drawn: list[str] = []
     monkeypatch.setattr(type(sys.stderr), "isatty", lambda self: True, raising=False)
-    monkeypatch.setattr("alfenctl.cli.report.write_live", drawn.append)
-    monkeypatch.setattr("alfenctl.cli.report.end_live", lambda: drawn.append("\n"))
+    monkeypatch.setattr("devicectl.cli.report.write_live", drawn.append)
+    monkeypatch.setattr("devicectl.cli.report.end_live", lambda: drawn.append("\n"))
     return drawn
 
 

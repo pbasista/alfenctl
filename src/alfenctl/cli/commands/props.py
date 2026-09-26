@@ -10,12 +10,31 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
 from typing import Any
+
+from devicectl.cli.command import Command
 
 from alfenctl import meter_map, properties, settings
 from alfenctl.charger import AlfenCharger, ChargerInfo
+from alfenctl.cli.commands.meter import write_meter_map
+from alfenctl.cli.exits import EXIT_ERROR, EXIT_OK
+from alfenctl.cli.output import (
+    confirm,
+    error,
+    note_reboot_required,
+    print_properties,
+    read_in,
+    shorten,
+    write_out,
+)
+from alfenctl.cli.target import repo_config
 from alfenctl.eds import VISIBLE_STRING, load_catalog
+from alfenctl.errors import AlfenError
+from alfenctl.ocpp import (
+    BACKOFFICE_CLEARED,
+    BACKOFFICE_NAME_MAX,
+    P_BACKOFFICE_NAME,
+)
 from alfenctl.repo import (
     RemotePreset,
     fetch_preset,
@@ -24,25 +43,11 @@ from alfenctl.repo import (
     pick_backoffice_variant,
 )
 from alfenctl.values import (
-    Property,
     coerce_input,
     format_value,
-    is_portable,
     merge,
     range_warning,
-    values_equal,
 )
-
-from alfenctl.cli.command import Command
-from alfenctl.cli.commands.meter import write_meter_map
-from alfenctl.cli.exits import EXIT_ERROR, EXIT_OK
-from alfenctl.cli.output import (
-    confirm,
-    note_reboot_required,
-    print_properties,
-    shorten,
-)
-from alfenctl.cli.target import repo_config
 
 
 def cmd_props(charger: AlfenCharger, args: argparse.Namespace) -> int:
@@ -61,7 +66,7 @@ def cmd_get(charger: AlfenCharger, args: argparse.Namespace) -> int:
     catalog = load_catalog()
     props, errors = properties.resolve(charger, catalog, args.queries)
     for err in errors:
-        print(f"error: {err}", file=sys.stderr)
+        error(err)
     if props:
         print_properties(props, as_json=args.json)
     return EXIT_ERROR if errors else EXIT_OK
@@ -72,7 +77,7 @@ def cmd_set(charger: AlfenCharger, args: argparse.Namespace) -> int:
     catalog = load_catalog()
     props, errors = properties.resolve(charger, catalog, [args.query])
     for err in errors:
-        print(f"error: {err}", file=sys.stderr)
+        error(err)
     if not props:
         return EXIT_ERROR
     if len(props) > 1:
@@ -84,16 +89,13 @@ def cmd_set(charger: AlfenCharger, args: argparse.Namespace) -> int:
         return EXIT_ERROR
     prop = props[0]
     if not prop.writable:
-        print(f"error: {prop.id_str} ({prop.name}) is read-only", file=sys.stderr)
-        return EXIT_ERROR
+        raise AlfenError(f"{prop.id_str} ({prop.name}) is read-only")
     try:
         value = coerce_input(prop, args.value)
     except ValueError as exc:
-        print(f"error: invalid value: {exc}", file=sys.stderr)
-        return EXIT_ERROR
+        raise AlfenError(f"invalid value: {exc}") from None
     if prop.live is None:
-        print(f"error: {prop.id_str} not found on the charger", file=sys.stderr)
-        return EXIT_ERROR
+        raise AlfenError(f"{prop.id_str} not found on the charger")
     objection = range_warning(prop.key, value)
     if objection is not None:
         print(f"warning: {objection}", file=sys.stderr)
@@ -150,11 +152,11 @@ def cmd_export(charger: AlfenCharger, args: argparse.Namespace) -> int:
             )
             + "\n"
         )
-    doc = kept
-    file = args.file
-    if file in (None, "-") and sys.stdout.isatty():
-        # Default to a named file when writing to a terminal: the charger's
-        # object id (serial) keeps one dump per device distinguishable.
+
+    def default_name() -> str:
+        # Named after the charger when writing to a terminal: the object id
+        # (serial) keeps one dump per device distinguishable.  Worked out
+        # only when it is wanted -- it costs a round trip.
         suffix = (
             settings.ENCRYPTED_SUFFIX
             if as_exml
@@ -162,49 +164,23 @@ def cmd_export(charger: AlfenCharger, args: argparse.Namespace) -> int:
             if as_xml
             else ".json"
         )
-        file = f"{info().object_id or 'charger'}{suffix}"
-    if file in (None, "-"):
-        sys.stdout.write(payload)
-        return EXIT_OK
-    path = Path(file)
-    if path.exists() and not args.yes:
-        if not confirm(f"'{file}' already exists. Overwrite?"):
-            print("Aborted.", file=sys.stderr)
-            return EXIT_ERROR
-    path.write_text(payload, encoding="utf-8")
-    print(f"Wrote {len(doc)} properties to {file}", file=sys.stderr)
-    return EXIT_OK
+        return f"{info().object_id or 'charger'}{suffix}"
 
-
-def _load_import_file(path: str) -> list[dict[str, Any]]:
-    """Read a property file: alfenctl's JSON, or the app's XML settings format.
-
-    The format is recognised from the content, not the name, so a settings
-    file saved under any extension still loads.
-    """
-    text = Path(path).read_text(encoding="utf-8")
-    if text.lstrip().startswith("<") or settings.looks_encrypted(text):
-        return list(settings.parse(text).as_entries())
-    return _load_json_import_file(text)
-
-
-def _load_json_import_file(text: str) -> list[dict[str, Any]]:
-    """Read an export file: a list of {id, value} entries (name optional)."""
-    data = json.loads(text)
-    if not isinstance(data, list) or not all(
-        isinstance(e, dict) and "id" in e and "value" in e for e in data
-    ):
-        raise ValueError('expected a JSON array of {"id", "value"} entries')
-    return data
+    return write_out(
+        payload,
+        args.file,
+        default_name=default_name,
+        yes=args.yes,
+        summary=f"{len(kept)} properties",
+    )
 
 
 def cmd_import(charger: AlfenCharger, args: argparse.Namespace) -> int:
     """Apply a property file to the charger, with a diff preview first."""
     try:
-        entries = _load_import_file(args.file)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        print(f"error: cannot read {args.file}: {exc}", file=sys.stderr)
-        return EXIT_ERROR
+        entries = properties.parse_entries(read_in(args.file))
+    except (OSError, ValueError) as exc:
+        raise AlfenError(f"cannot read {args.file}: {exc}") from None
     return _apply_entries(charger, entries, args)
 
 
@@ -214,56 +190,25 @@ def _apply_entries(
     args: argparse.Namespace,
 ) -> int:
     """Diff ``entries`` against the charger, preview, confirm, and write."""
-    catalog = load_catalog()
-    queries = [str(e["id"]) for e in entries]
-    props, errors = properties.resolve(charger, catalog, queries)
-    by_query = {p.id_str: p for p in props}
-    skipped_ro: list[str] = []
-    skipped_bound: list[Property] = []
-    writes: dict[tuple[int, int], tuple[Any, int | None]] = {}
-    plan: list[tuple[Property, Any, Any]] = []
-    for err in errors:
+    plan = properties.plan_import(charger, load_catalog(), entries, force=args.force)
+    for err in plan.missing:
         print(f"warning: {err} (skipped)", file=sys.stderr)
-    for entry in entries:
-        prop = by_query.get(str(entry["id"]))
-        if prop is None:
-            continue
-        if not prop.writable:
-            skipped_ro.append(prop.id_str)
-            continue
-        if not is_portable(prop.key) and not args.force:
-            # Writable, but bound to the charger it came from: serial,
-            # identity, MAC, IP, SCN membership, license key, meter wiring.
-            try:
-                value = coerce_input(prop, entry["value"])
-            except ValueError:
-                continue
-            if not values_equal(prop, value):
-                skipped_bound.append(prop)
-            continue
-        try:
-            value = coerce_input(prop, entry["value"])
-        except ValueError as exc:
-            print(f"warning: invalid value skipped: {exc}", file=sys.stderr)
-            continue
-        if values_equal(prop, value):
-            continue  # already in the desired state
-        writes[prop.key] = (value, prop.data_type)
-        plan.append((prop, prop.value, value))
-    if skipped_ro:
+    for _id, why in plan.invalid:
+        print(f"warning: invalid value skipped: {why}", file=sys.stderr)
+    if plan.read_only:
+        named = ", ".join(p.id_str for p in plan.read_only[:3])
         print(
-            f"note: {len(skipped_ro)} read-only properties skipped "
-            f"(e.g. {', '.join(skipped_ro[:3])})",
+            f"note: {len(plan.read_only)} read-only properties skipped (e.g. {named})",
             file=sys.stderr,
         )
-    if skipped_bound:
+    if plan.bound:
         print(
-            f"\nSkipped {len(skipped_bound)} propert"
-            f"{'y' if len(skipped_bound) == 1 else 'ies'} that belong to the "
+            f"\nSkipped {len(plan.bound)} propert"
+            f"{'y' if len(plan.bound) == 1 else 'ies'} that belong to the "
             "charger they came from:",
             file=sys.stderr,
         )
-        for prop in skipped_bound:
+        for prop in plan.bound:
             print(f"  {prop.id_str} {prop.name}", file=sys.stderr)
         print(
             "These identify the device (serial, identity, MAC, IP, SCN "
@@ -276,40 +221,24 @@ def _apply_entries(
     if not plan:
         print("Nothing to change; the charger already matches the file.")
         return EXIT_OK
-    print(f"{len(plan)} propert{'y' if len(plan) == 1 else 'ies'} to change:\n")
-    for prop, old, new in plan:
+    count = len(plan.changes)
+    print(f"{count} propert{'y' if count == 1 else 'ies'} to change:\n")
+    for change in plan.changes:
         print(
-            f"  {prop.id_str} {prop.name}: {shorten(old)} -> {shorten(prop.encoded(new))}"
+            f"  {change.prop.id_str} {change.prop.name}: "
+            f"{shorten(change.prop.value)} -> {shorten(change.after)}"
         )
     if args.dry_run:
         print("\nDry run; nothing written.")
         return EXIT_OK
-    if not args.yes:
-        if not confirm(f"\nApply {len(plan)} change(s) to the charger?"):
-            print("Aborted.")
-            return EXIT_ERROR
+    if not args.yes and not confirm(f"\nApply {count} change(s) to the charger?"):
+        print("Aborted.")
+        return EXIT_ERROR
+    writes = plan.writes
     charger.write_properties(writes)
     print(f"Applied {len(writes)} propert{'y' if len(writes) == 1 else 'ies'}.")
     note_reboot_required(writes)
     return EXIT_OK
-
-
-# The backoffice properties the app empties before it installs a preset, so
-# that a leftover URL or APN from the previous operator cannot survive into
-# the new one (``PanelConnectivity.ClearAllBackOfficeSettings``).  The four
-# network profiles it also clears are left alone here: they are a whole panel
-# of their own, and clearing them is not what "apply this preset" was asked.
-BACKOFFICE_CLEARED = (
-    (0x2071, 1),  # backoffice URL, wired
-    (0x2071, 2),  # backoffice path, wired
-    (0x2078, 1),  # backoffice URL, mobile
-    (0x2078, 2),  # backoffice path, mobile
-    (0x2100, 0),  # gprsAPNname
-    (0x2101, 0),  # gprsAPNuser
-    (0x2102, 0),  # gprsAPNpassword
-)
-P_BACKOFFICE_NAME = (0x2076, 0)  # 8310 commBackOfficeShortName: "preset,meter"
-BACKOFFICE_NAME_MAX = 50  # CombineBopresetMeterName gives up past this
 
 
 def _apply_backoffice(
@@ -355,6 +284,28 @@ def _apply_backoffice(
     return EXIT_OK
 
 
+def _pick_preset(
+    charger: AlfenCharger, presets: list[RemotePreset], wanted: str
+) -> RemotePreset:
+    """Find the one preset ``wanted`` names, or say why it does not name one."""
+    lowered = wanted.lower()
+    matches = [p for p in presets if lowered in (p.label.lower(), p.name.lower())] or [
+        p for p in presets if lowered in p.label.lower()
+    ]
+    if not matches:
+        raise AlfenError(f"no preset matches {wanted!r}")
+    labels = {p.label for p in matches}
+    if len(labels) > 1:
+        listed = "\n".join(f"  {label}" for label in sorted(labels))
+        raise AlfenError(f"{wanted!r} matches several presets:\n{listed}")
+    if len(matches) == 1:
+        return matches[0]
+    # One preset published once per encryption key; the firmware decides.
+    chosen = pick_backoffice_variant(matches, charger.basic_info().firmware_version)
+    assert chosen is not None
+    return chosen
+
+
 def cmd_preset(charger: AlfenCharger, args: argparse.Namespace) -> int:
     """List Alfen's published presets, or apply one."""
     config = repo_config(args)
@@ -364,45 +315,34 @@ def cmd_preset(charger: AlfenCharger, args: argparse.Namespace) -> int:
         return EXIT_OK
     if args.name is None:
         return _list_presets(presets, config.site)
-    wanted = args.name.lower()
-    matches = [p for p in presets if wanted in (p.label.lower(), p.name.lower())] or [
-        p for p in presets if wanted in p.label.lower()
-    ]
-    if not matches:
-        print(f"error: no preset matches {args.name!r}", file=sys.stderr)
-        return EXIT_ERROR
-    labels = {p.label for p in matches}
-    if len(labels) > 1:
-        print(f"{args.name!r} matches several presets:", file=sys.stderr)
-        for label in sorted(labels):
-            print(f"  {label}", file=sys.stderr)
-        return EXIT_ERROR
-    if len(matches) > 1:
-        # One preset published once per encryption key; the firmware decides.
-        info = charger.basic_info()
-        chosen = pick_backoffice_variant(matches, info.firmware_version)
-        assert chosen is not None
-        preset = chosen
-    else:
-        preset = matches[0]
+    preset = _pick_preset(charger, presets, args.name)
+
     if preset.is_backoffice:
         blob = fetch_preset_bytes(preset, config)
         if args.save:
-            Path(args.save).write_bytes(blob)
-            print(f"Wrote {preset.name} to {args.save}")
-            return EXIT_OK
+            return write_out(
+                blob,
+                args.save,
+                default_name=preset.name,
+                yes=args.yes,
+                summary=preset.name,
+            )
         return _apply_backoffice(charger, preset, blob, args)
     text = fetch_preset(preset, config)
     if args.save:
-        Path(args.save).write_text(text, encoding="utf-8")
-        print(f"Wrote {preset.name} to {args.save}")
-        return EXIT_OK
+        return write_out(
+            text,
+            args.save,
+            default_name=preset.name,
+            yes=args.yes,
+            summary=preset.name,
+        )
     if preset.is_meter_map:
         # A register map is not a property dump: it goes through the same
         # bracketed write as `meter-map apply`.
-        wanted = meter_map.parse_json(text)
-        current = meter_map.read(charger)
-        return write_meter_map(charger, wanted, current, args)
+        return write_meter_map(
+            charger, meter_map.parse_json(text), meter_map.read(charger), args
+        )
     print(f"Applying preset {preset.label} ({preset.kind}).\n")
     return _apply_entries(charger, settings.parse(text).as_entries(), args)
 
@@ -457,7 +397,8 @@ def add_parsers(
     sp.add_argument(
         "file",
         nargs="?",
-        help="output file (default: <object-id>.json to a terminal, else stdout)",
+        help="output file ('-' for stdout; default: <object-id>.json to a "
+        "terminal, else stdout)",
     )
     sp.add_argument("pattern", nargs="?", help="glob filter on id/name/title")
     sp.add_argument("--cat", help="only this property category")
@@ -489,7 +430,7 @@ def add_parsers(
         aliases=["restore"],
         parents=[common],
     )
-    sp.add_argument("file", help="JSON file written by export")
+    sp.add_argument("file", help="JSON file written by export ('-' for stdin)")
     sp.add_argument(
         "--dry-run", action="store_true", help="preview the diff, write nothing"
     )
@@ -518,7 +459,9 @@ def add_parsers(
         "name", nargs="?", help="preset to apply (omit to list what is published)"
     )
     sp.add_argument(
-        "--save", metavar="FILE", help="write the preset to a file instead of applying"
+        "--save",
+        metavar="FILE",
+        help="write the preset to a file instead of applying ('-' for stdout)",
     )
     sp.add_argument(
         "--dry-run", action="store_true", help="preview the changes, write nothing"
@@ -532,9 +475,9 @@ def add_parsers(
 
 
 COMMANDS: dict[str, Command] = {
-    "props": Command(cmd_props),
-    "ls": Command(cmd_props),
-    "get": Command(cmd_get),
+    "props": Command(cmd_props, fans_out=True),
+    "ls": Command(cmd_props, fans_out=True),
+    "get": Command(cmd_get, fans_out=True),
     "set": Command(cmd_set),
     "export": Command(cmd_export),
     "dump": Command(cmd_export),

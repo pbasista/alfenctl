@@ -18,16 +18,67 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from alfenctl.repo import RepoConfig
-
 if sys.version_info >= (3, 11):
     import tomllib
 else:  # pragma: no cover - exercised only on 3.10, via the tomli dependency
     import tomli as tomllib
 
+from devicectl import paths
+
 # Where the file lives when --config is not given; see default_config_path.
 CONFIG_DIR_NAME = "alfen"
 CONFIG_FILE_NAME = "alfen.toml"
+
+# --- the firmware repository ---------------------------------------------------------------
+# Straight from ICUServiceInstaller.AppProperties: the site, the shared
+# installer account, and the folder the firmware images live in.  The app
+# ships these in plain sight in its binary; they are not per-customer
+# credentials.
+#
+# They live here rather than in :mod:`alfenctl.repo` because they are
+# settings -- the ``[firmware]`` table of alfen.toml overrides every one of
+# them -- and a settings dataclass should not oblige the one command that
+# reads no settings to import an FTP client, a zip reader and an HTTP stack
+# to find out where its config file is.
+DEFAULT_SITE = "ftp.alfen.com"
+DEFAULT_PORT = 21
+DEFAULT_USERNAME = "installer"
+DEFAULT_PASSWORD = "jIf978FQmk1W"  # published in the app's binary
+DEFAULT_DIRECTORY = "Firmware"
+# The app allows itself 2 s (AppProperties.FTPCommunicationTimeout); that is
+# tight for a listing over the open internet, so we are more patient.
+DEFAULT_TIMEOUT_S = 20.0
+
+
+@dataclass
+class RepoConfig:
+    """Where to fetch firmware from; overridable via ``[firmware]`` in alfen.toml."""
+
+    site: str = DEFAULT_SITE
+    port: int = DEFAULT_PORT
+    username: str = DEFAULT_USERNAME
+    password: str = DEFAULT_PASSWORD
+    directory: str = DEFAULT_DIRECTORY
+    timeout: float = DEFAULT_TIMEOUT_S
+
+    @property
+    def location(self) -> str:
+        """Return a human-readable "host/directory" for messages."""
+        return f"{self.site}/{self.directory}".rstrip("/")
+
+
+def default_cache_dir() -> Path:
+    """Return where downloaded images are kept between runs.
+
+    ``$XDG_CACHE_HOME/alfen/firmware``, falling back to
+    ``~/.cache/alfen/firmware`` -- the counterpart of the app's
+    ``%APPDATA%/ACE Service Installer/Firmware`` mirror, except that we fill
+    it lazily with what was actually asked for.
+    """
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".cache"
+    return base / "alfen" / "firmware"
+
 
 # What ``alfenctl config init`` writes.  It is a working file, all of it
 # commented out, so an installer can uncomment the two lines they need
@@ -76,22 +127,8 @@ _FIRMWARE_KEYS = frozenset(
 
 
 def default_config_dir() -> Path:
-    """Return the directory the configuration lives in, per platform.
-
-    ``XDG_CONFIG_HOME`` wins wherever it is set, so a dotfiles setup that
-    exports it keeps working.  Otherwise Windows uses ``%APPDATA%``, where
-    Windows programs keep per-user settings; everywhere else uses
-    ``~/.config``, which is both the XDG default and where command-line
-    tools put themselves on macOS.
-    """
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    if xdg:
-        return Path(xdg).expanduser() / CONFIG_DIR_NAME
-    if sys.platform == "win32":
-        appdata = os.environ.get("APPDATA")
-        if appdata:
-            return Path(appdata) / CONFIG_DIR_NAME
-    return Path.home() / ".config" / CONFIG_DIR_NAME
+    """Return the directory the configuration lives in, per platform."""
+    return paths.config_dir(CONFIG_DIR_NAME)
 
 
 def default_config_path() -> Path:

@@ -1,0 +1,123 @@
+{
+  "state": {
+    "mode": 2,
+    "plug_and_charge_id": "ACE0781464",
+    "whitelist_enabled": true,
+    "local_list_enabled": false,
+    "restart_after_outage": true,
+    "max_outage_s": 600,
+    "remote_tx_requests": true,
+    "stop_on_invalid_tag": false,
+    "abort_concurrent": true,
+    "connection_timeout_s": 120,
+    "authorization_timeout_s": 60,
+    "online_action": 2,
+    "offline_action": 3,
+    "offline_raw": [
+      1,
+      1
+    ]
+  },
+  "warnings": [],
+  "rows": [
+    [
+      "Mode",
+      "RFID reader"
+    ],
+    [
+      "Plug & charge id",
+      "ACE0781464"
+    ],
+    [
+      "Whitelist",
+      "enabled"
+    ],
+    [
+      "Local list",
+      "disabled"
+    ],
+    [
+      "Restart after outage",
+      "enabled"
+    ],
+    [
+      "Remote start requests",
+      "enabled"
+    ],
+    [
+      "Stop on invalid tag",
+      "disabled"
+    ],
+    [
+      "Abort concurrent",
+      "enabled"
+    ],
+    [
+      "Offline action",
+      "accept any tag"
+    ],
+    [
+      "Online action",
+      "ask the backoffice, then fall back to the list"
+    ],
+    [
+      "Max outage",
+      "600 s"
+    ],
+    [
+      "Connection timeout",
+      "120 s"
+    ],
+    [
+      "Authorisation timeout",
+      "60 s"
+    ]
+  ],
+  "json": {
+    "mode": 2,
+    "plugAndChargeId": "ACE0781464",
+    "whitelistEnabled": true,
+    "localListEnabled": false,
+    "restartAfterOutage": true,
+    "remoteTxRequests": true,
+    "stopOnInvalidTag": false,
+    "abortConcurrent": true,
+    "offlineAction": 3,
+    "onlineAction": 2,
+    "maxOutageS": 600,
+    "connectionTimeoutS": 120,
+    "authorizationTimeoutS": 60,
+    "warnings": [],
+    "options": {
+      "mode": {
+        "0": "plug and charge",
+        "2": "RFID reader"
+      },
+      "offlineAction": {
+        "0": "refuse every tag",
+        "1": "accept a known tag",
+        "3": "accept any tag"
+      },
+      "onlineAction": {
+        "0": "ask the backoffice",
+        "1": "accept a known tag without asking",
+        "2": "ask the backoffice, then fall back to the list",
+        "3": "accept any tag"
+      }
+    },
+    "bounds": {
+      "maxOutageS": {
+        "min": 0,
+        "max": 3600
+      },
+      "connectionTimeoutS": {
+        "min": 0,
+        "max": 3600
+      },
+      "authorizationTimeoutS": {
+        "min": 0,
+        "max": 3600
+      }
+    }
+  }
+}

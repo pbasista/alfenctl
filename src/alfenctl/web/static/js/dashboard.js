@@ -6,11 +6,13 @@
  * the way to "16" is a real number the station would act on.
  */
 
-import { html, useRef, useState } from '../vendor/preact-htm.module.js';
-import { Apply, EnumRow, NumRow, ToggleRow, useDraft } from './panels.js';
-import { PowerChart, usePowerHistory } from './powerchart.js';
 
-import { Card, Caveats, DASH, fmt, Help, Row } from './ui.js';
+import { Band } from '/core/js/band.js';
+import { offerWriter, useDraft } from '/core/js/drafts.js';
+import { EnumRow, NumRow, ToggleRow } from '/core/js/panels.js';
+import { Card, Caveats, ClockRows, DASH, fmt, HealthCard, Help, Row, SyncClock } from '/core/js/ui.js';
+import { html, useRef, useState } from '/core/vendor/preact-htm.module.js';
+import { PowerChart, usePowerHistory } from './powerchart.js';
 
 const CHARGING_WORDS = ['charging', 'ev connected', 'nfc'];
 const BIG_DRIFT_S = 60;
@@ -240,7 +242,7 @@ function Relay({ state }) {
  * shares one pair of edges.
  */
 function Sockets({ status, controls, sockets, setup, onApply, readOnly, busy }) {
-  const edits = useDraft();
+  const draft = useDraft('sockets');
   const live = controls || {};
   const reported = status?.sockets || [];
   /* How many sockets are on the wall.  A single-socket station still
@@ -260,7 +262,7 @@ function Sockets({ status, controls, sockets, setup, onApply, readOnly, busy }) 
     .sort((a, b) => a - b);
   const safe = status?.activeSafeCurrentA;
   const editable = !readOnly;
-  const { station, sockets: socketBounds } = currentBounds(live, limits, edits.draft);
+  const { station, sockets: socketBounds } = currentBounds(live, limits, draft.edits);
 
   /* What the station is, as opposed to what it is set to: the two limits
    * above its own, which are read-only here.  They sit where a socket keeps
@@ -293,12 +295,9 @@ function Sockets({ status, controls, sockets, setup, onApply, readOnly, busy }) 
       .filter((n) => socketBounds.get(n)?.moved)
       .map((n) => ({ number: n, maxCurrentA: number(socketBounds.get(n).value) }));
     if (changed.length) payload.sockets = changed;
-    if (!Object.keys(payload).length) {
-      edits.clear();
-      return;
-    }
-    onApply(payload).then(edits.clear, () => {});
+    return Object.keys(payload).length ? onApply(payload) : undefined;
   };
+  offerWriter('sockets', { title: 'Sockets', busy, disabled: !editable, write: send });
 
   /* One current, in the row every tile on this card keeps it in. */
   const limitRow = (bound, onInput) => {
@@ -326,7 +325,7 @@ function Sockets({ status, controls, sockets, setup, onApply, readOnly, busy }) 
     }
   }
 
-  return html`<${Card} title="Sockets">
+  return html`<${Card} title="Sockets" draft=${draft}>
     ${[...ranges].map(([id, [lo, hi]]) => html`<${AmpsTicks} key=${id} min=${lo} max=${hi} />`)}
     <div class="sockets">
       ${numbers.map((n) => {
@@ -342,7 +341,7 @@ function Sockets({ status, controls, sockets, setup, onApply, readOnly, busy }) 
             <${Relay} state=${socket.power} />
             ${socket.led && html`<${Stat} k="led" v=${socket.led} />`}
           </div>`}
-          ${limitRow(socketBounds.get(n), (v) => edits.set(`socket${n}`, v))}
+          ${limitRow(socketBounds.get(n), (v) => draft.set(`socket${n}`, v))}
         </div>`;
       })}
 
@@ -358,12 +357,11 @@ function Sockets({ status, controls, sockets, setup, onApply, readOnly, busy }) 
             (fact) => html`<${Stat} key=${fact.k} k=${fact.k} v=${fact.v} />`
           )}
         </div>`}
-        ${limitRow(station, (v) => edits.set('station', v))}
+        ${limitRow(station, (v) => draft.set('station', v))}
       </div>`}
     </div>
 
     <${Caveats} items=${live.warnings} />
-    ${editable && html`<${Apply} edits=${edits} busy=${busy} onApply=${send} />`}
   <//>`;
 }
 
@@ -527,19 +525,18 @@ function Degrees({ value, live, min, max, label, onInput }) {
  * rule this page is built on.
  */
 function Conditions({ status, controls, display, setup, onApply, readOnly, busy }) {
-  const edits = useDraft();
+  const draft = useDraft('conditions');
   const live = controls || {};
 
   const now = status?.temperatureC ?? null;
-  const { min, max, low, high, lowLive, highLive } = alarmBounds(live, now, edits.draft);
+  const { min, max, low, high, lowLive, highLive } = alarmBounds(live, now, draft.edits);
   const hasTemperature = now !== null || low !== null || high !== null;
   const bandEditable = !readOnly && (low !== null || high !== null);
-  const at = (value) => clamp(((value - min) / (max - min)) * 100, 0, 100);
   const cold = now !== null && low !== null && now < low;
   const hot = now !== null && high !== null && now > high;
 
-  const level = edits.get('intensity', live.intensity);
-  const auto = edits.get('autoDim', live.autoDim);
+  const level = draft.get('intensity', live.intensity);
+  const auto = draft.get('autoDim', live.autoDim);
   // `undefined` is "the charger was not asked", which is not "no".
   const noScreen = display?.present === false;
   const hasIntensity = live.intensity !== null && live.intensity !== undefined;
@@ -585,16 +582,13 @@ function Conditions({ status, controls, display, setup, onApply, readOnly, busy 
     const payload = {};
     if (low !== null && low !== lowLive) payload.temperatureAlarmLowC = low;
     if (high !== null && high !== highLive) payload.temperatureAlarmHighC = high;
-    if ('intensity' in edits.draft) payload.intensity = number(edits.draft.intensity);
-    if ('autoDim' in edits.draft) payload.autoDim = Boolean(edits.draft.autoDim);
-    if (!Object.keys(payload).length) {
-      edits.clear();
-      return;
-    }
-    onApply(payload).then(edits.clear, () => {});
+    if ('intensity' in draft.edits) payload.intensity = number(draft.edits.intensity);
+    if ('autoDim' in draft.edits) payload.autoDim = Boolean(draft.edits.autoDim);
+    return Object.keys(payload).length ? onApply(payload) : undefined;
   };
+  offerWriter('conditions', { title, busy, disabled: readOnly, write: send });
 
-  return html`<${Card} title=${title} actions=${badge}>
+  return html`<${Card} title=${title} actions=${badge} draft=${draft}>
     ${noScreen &&
     html`<p class="note">
       This station has no display: there is nowhere to put a logo, and the
@@ -611,24 +605,35 @@ function Conditions({ status, controls, display, setup, onApply, readOnly, busy 
       </span>`}
     </div>
 
-    <div class="tempband">
-      <div class="track">
-        ${low !== null &&
-        high !== null &&
-        html`<span
-          class="ok"
-          style=${`left:${at(low)}%;right:${100 - at(high)}%`}
-          title=${`no alarm between ${fmt(low, 0)} and ${fmt(high, 0)} °C`}
-        ></span>`}
-        ${now !== null &&
-        html`<span
-          class=${`now${cold || hot ? ' bad' : ''}`}
-          style=${`left:${at(now)}%`}
-          title=${`${fmt(now, 1)} °C now`}
-        ></span>`}
-      </div>
-      <div class="ends"><span>${fmt(min, 0)} °C</span><span>${fmt(max, 0)} °C</span></div>
-    </div>`}
+    <${Band}
+      min=${min}
+      max=${max}
+      step=${1}
+      digits=${1}
+      unit="°C"
+      now=${now}
+      nowLabel="station now"
+      label="temperature against its alarm limits"
+      handles=${[
+        low !== null && {
+          key: 'low',
+          label: 'Alarm below',
+          value: low,
+          saved: lowLive,
+          side: 'low',
+          max: high === null ? undefined : high - 1,
+        },
+        high !== null && {
+          key: 'high',
+          label: 'Alarm above',
+          value: high,
+          saved: highLive,
+          side: 'high',
+          min: low === null ? undefined : low + 1,
+        },
+      ].filter(Boolean)}
+      onChange=${bandEditable ? (key, value) => draft.set(key, value) : null}
+    />`}
 
     ${rows &&
     html`<div class="rows spaced">
@@ -642,7 +647,7 @@ function Conditions({ status, controls, display, setup, onApply, readOnly, busy 
               min=${min}
               max=${max}
               label="low temperature alarm, degrees Celsius"
-              onInput=${(v) => edits.set('low', v)}
+              onInput=${(v) => draft.set('low', v)}
             />`
           : `${fmt(lowLive, 0)} °C`}
       />`}
@@ -656,14 +661,14 @@ function Conditions({ status, controls, display, setup, onApply, readOnly, busy 
               min=${min}
               max=${max}
               label="high temperature alarm, degrees Celsius"
-              onInput=${(v) => edits.set('high', v)}
+              onInput=${(v) => draft.set('high', v)}
             />`
           : `${fmt(highLive, 0)} °C`}
       />`}
       ${hasIntensity &&
       html`<${Row}
         k="Brightness"
-        title="one setting for the screen and the LEDs both"
+        hint="one setting for the screen and the LEDs both"
         v=${readOnly
           ? `${level}%`
           : html`<span class="set">
@@ -674,7 +679,7 @@ function Conditions({ status, controls, display, setup, onApply, readOnly, busy 
                 step="5"
                 value=${level}
                 aria-label="display and LED brightness, percent"
-                onInput=${(e) => edits.set('intensity', e.target.value)}
+                onInput=${(e) => draft.set('intensity', e.target.value)}
               />
               <span class=${`val${Number(level) !== Number(live.intensity) ? ' pending' : ''}`}>
                 ${level}%
@@ -683,18 +688,19 @@ function Conditions({ status, controls, display, setup, onApply, readOnly, busy 
       />`}
       ${hasAutoDim &&
       html`<${ToggleRow}
+        pending=${draft.has('autoDim')}
         k="Auto dim"
         value=${auto}
-        onChange=${(v) => edits.set('autoDim', v)}
+        onChange=${(v) => draft.set('autoDim', v)}
         disabled=${readOnly}
         label="when idle"
-        title="dim the display and the LEDs when nothing is happening at the station"
+        hint="dim the display and the LEDs when nothing is happening at the station"
       />`}
       ${language &&
       html`<${Row}
         k="Language"
         v=${language}
-        title="the language the charger's own display speaks"
+        hint="the language the charger's own display speaks"
       />`}
       ${display?.present &&
       display.width &&
@@ -704,26 +710,21 @@ function Conditions({ status, controls, display, setup, onApply, readOnly, busy 
           key=${k}
           k=${k}
           v=${v}
-          title="what the screen shows a session costing -- the charger bills nobody"
+          hint="what the screen shows a session costing -- the charger bills nobody"
         />`
       )}
     </div>`}
-    ${!readOnly && html`<${Apply} edits=${edits} busy=${busy} onApply=${send} />`}
   <//>`;
 }
 
 function Identity({ info, hardware, setup, clock, onSync, readOnly, busy }) {
   /* The clock lives here: the identity is the station's "who and since
    * when", and a clock nobody set is part of that -- its drift badge is
-   * what says a station was never given the time of day. */
-  const drifted =
-    clock && clock.driftSeconds !== null && Math.abs(clock.driftSeconds) > BIG_DRIFT_S;
-  const plain = (stamp) => (stamp || '').replace('T', ' ');
+   * what says a station was never given the time of day.  The two rows and
+   * the button are the shared ones jkctl's Identity card draws too. */
   return html`<${Card}
     title="Station"
-    actions=${!readOnly &&
-    clock &&
-    html`<button class="btn small" disabled=${busy} onClick=${onSync}>Sync clock</button>`}
+    actions=${!readOnly && clock && html`<${SyncClock} busy=${busy} onSync=${onSync} />`}
   >
     <div class="rows">
       <${Row} k="Object ID" v=${info?.objectId} data=${true} />
@@ -731,13 +732,12 @@ function Identity({ info, hardware, setup, clock, onSync, readOnly, busy }) {
       <${Row} k="Model" v=${info?.model} data=${true} />
       <${Row} k="Firmware" v=${info?.firmware} data=${true} />
       <${Row} k="Sockets" v=${info?.sockets} />
-      <${Row} k="Uptime" v=${setup?.uptime} title="time since the last reboot" />
+      <${Row} k="Uptime" v=${setup?.uptime} hint="time since the last reboot" />
       ${clock &&
-      html`<${Row} k="Local time" v=${plain(clock.local)} data=${true} title=${`time zone ${clock.zone || 'unknown'}`} />
-      <${Row}
-        k="Clock difference"
-        v=${html`<span class=${drifted ? 'badge warn' : ''}>${clock.drift}</span>`}
-        title="the charger keeps UTC and derives local time from a stored offset"
+      html`<${ClockRows}
+        clock=${{ local: clock.local, drift: clock.drift, driftS: clock.driftSeconds }}
+        zone=${`the charger keeps UTC and shows it in its own zone: ${clock.zone || 'unknown'}`}
+        outAfter=${BIG_DRIFT_S}
       />`}
       ${setup?.latitude !== null &&
       setup?.latitude !== undefined &&
@@ -746,7 +746,7 @@ function Identity({ info, hardware, setup, clock, onSync, readOnly, busy }) {
       html`<${Row}
         k="Position"
         v=${`${fmt(setup.latitude, 5)}, ${fmt(setup.longitude, 5)}`}
-        title="the position the station was given at installation"
+        hint="the position the station was given at installation"
       />`}
       ${(hardware || []).map((item) => html`<${Row} key=${item.label} k=${item.label} v=${item.value} />`)}
     </div>
@@ -766,9 +766,45 @@ function realUniqueId(value) {
   return text && /[^0.\-\s]/.test(text) ? text : null;
 }
 
-function License({ license, onInstall, readOnly, busy }) {
+function License({
+  license,
+  onInstall,
+  onCloudLookup,
+  onCloudSignInStart,
+  onCloudSignInFinish,
+  onCloudSignOut,
+  cloudSignedIn,
+  readOnly,
+  busy,
+}) {
   const [key, setKey] = useState('');
   const [open, setOpen] = useState(false);
+  /* The manufacturer lookup is a read against Alfen's servers, separate from
+   * the local charger.  The friendly path signs in on Alfen's own page (the
+   * password is typed there, never here) and the server caches the token, so
+   * the lookup then needs nothing pasted; the token field stays as a fallback
+   * for scripts and power users. */
+  const [cloudOpen, setCloudOpen] = useState(false);
+  const [token, setToken] = useState('');
+  const [useToken, setUseToken] = useState(false);
+  const [started, setStarted] = useState(false);
+  const [redirected, setRedirected] = useState('');
+  const [signingIn, setSigningIn] = useState(false);
+  const [signedIn, setSignedIn] = useState(false);
+  const [cloud, setCloud] = useState(null);
+  const [looking, setLooking] = useState(false);
+  const [showDefaults, setShowDefaults] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  /* Signed in if this session just did it (paste flow), or if the server
+   * already holds a token -- from the loopback sign-in that reloaded the page,
+   * or from a previous `alfenctl cloud login`. */
+  const effectiveSignedIn = signedIn || cloudSignedIn;
+  /* The automatic sign-in only works when the page is opened at a localhost
+   * address: Alfen's client accepts a `http://localhost:<port>/` redirect and
+   * nothing else, so a LAN address or `127.0.0.1` falls back to pasting. The
+   * page knows its own hostname, so it can say so before anyone tries. */
+  const onLocalhost =
+    typeof window !== 'undefined' && window.location.hostname === 'localhost';
   if (license && license.supported === false) {
     return html`<${Card} title="License">
       <div class="empty">This firmware does not use license keys.</div>
@@ -780,9 +816,75 @@ function License({ license, onInstall, readOnly, busy }) {
   const features = license?.features || [];
   const unlocked = features.filter((feature) => feature.on).length;
   const uniqueId = realUniqueId(license?.uniqueId);
+  const startSignIn = async () => {
+    if (!onCloudSignInStart) return;
+    const result = await onCloudSignInStart();
+    if (!result?.url) return;
+    if (result.loopback) {
+      /* The redirect lands back on this page with the code; navigating the
+       * same tab makes the return seamless -- the app finishes the sign-in on
+       * load and comes right back to where it was. */
+      window.location.href = result.url;
+    } else {
+      /* A browser cannot land on the mobile scheme, so open Alfen in a new
+       * tab and read the redirect address back by hand. */
+      window.open(result.url, '_blank', 'noopener');
+      setStarted(true);
+    }
+  };
+  const finishSignIn = async () => {
+    if (!redirected.trim() || !onCloudSignInFinish) return;
+    setSigningIn(true);
+    try {
+      const result = await onCloudSignInFinish(redirected.trim());
+      if (result) {
+        setSignedIn(true);
+        setStarted(false);
+        setRedirected('');
+      }
+    } finally {
+      setSigningIn(false);
+    }
+  };
+  const signOut = async () => {
+    if (!onCloudSignOut) return;
+    setSigningOut(true);
+    try {
+      const result = await onCloudSignOut();
+      if (result) {
+        setSignedIn(false);
+        setCloud(null);
+        setToken('');
+        setStarted(false);
+        setRedirected('');
+      }
+    } finally {
+      setSigningOut(false);
+    }
+  };
+  const canLookUp = effectiveSignedIn || (useToken && token.trim());
+  const lookUp = async () => {
+    if (!canLookUp || !onCloudLookup) return;
+    setLooking(true);
+    try {
+      const result = await onCloudLookup(useToken ? token.trim() : undefined);
+      if (result) setCloud(result);
+    } finally {
+      setLooking(false);
+    }
+  };
   return html`<${Card}
     title="License"
-    actions=${!readOnly && html`<button class="btn small" onClick=${() => setOpen(!open)}>${open ? 'Cancel' : 'Install a key'}</button>`}
+    actions=${html`<div class="actions">
+      ${onCloudLookup &&
+      html`<button class="btn small" onClick=${() => setCloudOpen(!cloudOpen)}>
+        ${cloudOpen ? 'Hide' : 'Manufacturer'}
+      </button>`}
+      ${!readOnly &&
+      html`<button class="btn small" onClick=${() => setOpen(!open)}>
+        ${open ? 'Cancel' : 'Install a key'}
+      </button>`}
+    </div>`}
   >
     <div class="rows">
       ${uniqueId && html`<${Row} k="Unique ID" v=${uniqueId} data=${true} />`}
@@ -824,6 +926,161 @@ function License({ license, onInstall, readOnly, busy }) {
         Install
       </button>
     </div>`}
+    ${cloudOpen &&
+    html`<div class="cloud-panel">
+      <p class="muted small">
+        Look this station up on Alfen's servers. Sign in with your Alfen
+        account — you enter your username and password on Alfen's own page,
+        never here. The page returns here on its own once you have.
+      </p>
+
+      ${!effectiveSignedIn && !useToken && onCloudSignInStart &&
+      html`<p class=${`note small${onLocalhost ? '' : ' warn'}`}>
+        ${onLocalhost
+          ? 'Automatic sign-in works because this page is open at a localhost address.'
+          : `This page is open at ${window.location.hostname}, not localhost, so the
+             automatic return will not work here — you will sign in by pasting the
+             address back. Open the UI at a http://localhost:<port> address for the
+             one-click flow.`}
+      </p>`}
+
+      ${!effectiveSignedIn && !useToken && onCloudSignInStart &&
+      html`<div class="rows">
+        <div class="card-foot">
+          <button class="btn primary" disabled=${signingIn} onClick=${startSignIn}>
+            ${started ? 'Reopen the Alfen sign-in page' : 'Sign in with Alfen'}
+          </button>
+        </div>
+        ${started &&
+        html`<div class="rows spaced">
+          <p class="muted small">
+            A new tab opened Alfen's login. After you sign in, the page hands
+            off to the mobile app and will not load — copy its full address
+            from the browser's address bar and paste it here.
+          </p>
+          <div class="card-foot">
+            <input
+              type="text"
+              class="grow"
+              placeholder="com.alfen.myeve://oauth/redirect?code=…"
+              value=${redirected}
+              onInput=${(e) => setRedirected(e.target.value)}
+            />
+            <button
+              class="btn primary"
+              disabled=${signingIn || !redirected.trim()}
+              onClick=${finishSignIn}
+            >
+              ${signingIn ? 'Signing in…' : 'Finish sign-in'}
+            </button>
+          </div>
+        </div>`}
+      </div>`}
+
+      ${effectiveSignedIn && !useToken &&
+      html`<div class="card-foot spaced">
+        <span class="muted small grow">Signed in to Alfen.</span>
+        ${onCloudSignOut &&
+        html`<button class="btn small ghost" disabled=${signingOut} onClick=${signOut}>
+          ${signingOut ? 'Signing out…' : 'Sign out'}
+        </button>`}
+      </div>`}
+
+      ${useToken &&
+      html`<p class="muted small">
+        Paste an account access token (for example one from
+        <code>alfenctl cloud login</code>). Your Alfen password is never sent
+        here.
+      </p>`}
+
+      <div class="card-foot">
+        ${useToken &&
+        html`<input
+          type="password"
+          class="grow"
+          placeholder="Alfen access token"
+          value=${token}
+          onInput=${(e) => setToken(e.target.value)}
+        />`}
+        <button
+          class="btn"
+          disabled=${busy || looking || !canLookUp}
+          onClick=${lookUp}
+        >
+          ${looking ? 'Looking up…' : 'Look up'}
+        </button>
+      </div>
+
+      ${onCloudSignInStart &&
+      html`<button
+        class="btn small ghost"
+        onClick=${() => setUseToken(!useToken)}
+      >
+        ${useToken ? 'Use Alfen sign-in instead' : 'Use an access token instead'}
+      </button>`}
+
+      ${cloud &&
+      html`<div class="rows spaced">
+        ${cloud.account && html`<${Row} k="Account" v=${cloud.account} />`}
+        ${cloud.company && html`<${Row} k="Company" v=${cloud.company} />`}
+        ${cloud.phone && html`<${Row} k="Phone" v=${cloud.phone} />`}
+        ${cloud.warrantyType && html`<${Row} k="Warranty" v=${cloud.warrantyType} />`}
+        ${cloud.warrantyEnddate &&
+        html`<${Row} k="Warranty until" v=${cloud.warrantyEnddate} />`}
+        ${(cloud.records !== null && cloud.records !== undefined) &&
+        html`<${Row}
+          k="Records on file"
+          v=${cloud.records}
+          hint="how many changes Alfen has logged for this station"
+        />`}
+        ${cloud.lastRecorded &&
+        html`<${Row}
+          k="Last recorded change"
+          v=${cloud.lastRecorded}
+          hint="when Alfen last logged a change for this station"
+        />`}
+        <${Row} k="Registered key" v=${cloud.registeredKey || '—'} data=${true} />
+        ${cloud.registeredKey && cloud.matches &&
+        html`<div class="muted small">The charger already has this key.</div>`}
+        ${cloud.registeredKey && !cloud.matches && !readOnly &&
+        html`<div class="card-foot">
+          <button
+            class="btn primary"
+            disabled=${busy}
+            onClick=${() => onInstall(cloud.registeredKey)}
+          >
+            Install this key
+          </button>
+        </div>`}
+        ${(cloud.defaults || []).length > 0 &&
+        html`<div class="rows">
+          <button
+            class="btn small ghost"
+            onClick=${() => setShowDefaults(!showDefaults)}
+          >
+            ${showDefaults ? 'Hide' : 'Show'} factory defaults (${cloud.defaults.length})
+          </button>
+          <p class="muted small">
+            Every property value Alfen keeps on file for this station — the
+            profile the manufacturer would reset it to.
+          </p>
+          ${showDefaults &&
+          html`<div class="rows spaced">
+            ${cloud.defaults.map(
+              (prop) => html`<${Row}
+                key=${prop.id}
+                k=${prop.title || prop.name || prop.id}
+                v=${prop.value === null || prop.value === undefined || prop.value === ''
+                  ? '—'
+                  : String(prop.value)}
+                hint=${prop.title || prop.name ? prop.id : ''}
+                data=${true}
+              />`
+            )}
+          </div>`}
+        </div>`}
+      </div>`}
+    </div>`}
   <//>`;
 }
 
@@ -836,63 +1093,15 @@ function License({ license, onInstall, readOnly, busy }) {
  */
 function Doctor({ onDoctor, busy }) {
   const [report, setReport] = useState(null);
-  const [running, setRunning] = useState(false);
-  const run = async () => {
-    setRunning(true);
-    try {
+  return html`<${HealthCard}
+    report=${report}
+    busy=${busy}
+    idle="One pass over every panel, with the same findings the terminal prints. It takes a few seconds."
+    onRun=${async () => {
       const doc = await onDoctor();
-      setReport(doc.doctor);
-    } finally {
-      setRunning(false);
-    }
-  };
-
-  const { counts = {}, findings = [] } = report || {};
-  const worst = !report
-    ? null
-    : counts.error
-      ? 'error'
-      : counts.warning
-        ? 'warning'
-        : findings.length
-          ? 'note'
-          : 'clean';
-  const badge = report
-    ? html`<span class=${`badge ${worst === 'error' ? 'bad' : worst === 'warning' ? 'warn' : 'good'}`}>
-        ${worst === 'clean'
-          ? 'nothing to report'
-          : `${counts.error || 0} error, ${counts.warning || 0} warning, ${counts.note || 0} note`}
-      </span>`
-    : null;
-
-  return html`<${Card} title="Health" actions=${badge}>
-    ${!report
-      ? html`<div class="empty">
-          One pass over every panel, with the same findings the terminal
-          prints. It takes a few seconds.
-        </div>`
-      : findings.length === 0
-        ? html`<div class="empty">Nothing to report -- this charger looks well.</div>`
-        : html`<div class="rows">
-            ${findings.map(
-              (f, i) => html`<${Row}
-                key=${i}
-                k=${f.area}
-                title=${f.fix || ''}
-                v=${html`<span
-                  class=${`badge ${f.severity === 'error' ? 'bad' : f.severity === 'warning' ? 'warn' : ''}`}
-                >
-                  ${f.detail}
-                </span>`}
-              />`
-            )}
-          </div>`}
-    <div class="card-foot">
-      <button class="btn" disabled=${busy || running} onClick=${run}>
-        ${running ? 'Checking...' : report ? 'Check again' : 'Run the check'}
-      </button>
-    </div>
-  <//>`;
+      if (doc) setReport(doc.doctor);
+    }}
+  />`;
 }
 
 /* Load balancing, and the three settings worth changing from here.
@@ -948,26 +1157,23 @@ function modeKey(isStatic, isActive) {
 }
 
 function BalancingSummary({ lb, onWrite, readOnly, busy }) {
-  const edits = useDraft();
+  const draft = useDraft('dashboard:lb');
   if (!lb) return null;
-  const get = (key) => edits.get(key, lb[key]);
+  const get = (key) => draft.get(key, lb[key]);
   const bounds = lb.bounds || {};
   const editable = !readOnly && Boolean(onWrite);
-  const mode = edits.get('mode', modeKey(lb.static, lb.active));
+  const mode = draft.get('mode', modeKey(lb.static, lb.active));
 
   const send = () => {
-    const { mode: picked, ...payload } = edits.draft;
+    const { mode: picked, ...payload } = draft.edits;
     /* The blank option is "the charger has not said", which is not a mode
      * anybody can be put into: picking it writes nothing. */
     if (MODES[picked]) Object.assign(payload, MODES[picked].bits);
-    if (!Object.keys(payload).length) {
-      edits.clear();
-      return;
-    }
-    onWrite(payload).then(edits.clear, () => {});
+    return Object.keys(payload).length ? onWrite(payload) : undefined;
   };
+  offerWriter('dashboard:lb', { title: 'Load balancing', busy, disabled: !editable, write: send });
 
-  return html`<${Card} title="Load balancing">
+  return html`<${Card} title="Load balancing" draft=${draft}>
     <${Help} summary="The mode and the currents; the rest is on the Charging tab.">
       The phases, the meter's data source and solar charging stay in the
       full editor there: those are configuration rather than a decision
@@ -976,63 +1182,66 @@ function BalancingSummary({ lb, onWrite, readOnly, busy }) {
     <//>
     <div class="rows">
       <${EnumRow}
+        pending=${draft.has('mode')}
         k="Mode"
         readOnly=${!editable}
         value=${mode}
         table=${MODE_TITLES}
         kind="text"
-        onChange=${(v) => edits.set('mode', v)}
+        onChange=${(v) => draft.set('mode', v)}
         disabled=${busy}
         includeBlank
-        title="whether the station is managed at all, and against what"
+        hint="whether the station is managed at all, and against what"
       />
       <${NumRow}
+        pending=${draft.has('safeCurrentA')}
         k="Safe current"
         readOnly=${!editable}
         value=${get('safeCurrentA')}
         live=${lb.safeCurrentA}
-        min=${bounds.minSafeCurrentA}
-        max=${bounds.maxSafeCurrentA}
+        min=${bounds.safeCurrentA?.min}
+        max=${bounds.safeCurrentA?.max}
         unit="A"
-        onChange=${(v) => edits.set('safeCurrentA', v)}
+        onChange=${(v) => draft.set('safeCurrentA', v)}
         disabled=${busy}
-        title="what the station falls back to when nothing is managing it"
+        hint="what the station falls back to when nothing is managing it"
       />
       ${lb.maxMeterCurrentA !== null &&
       lb.maxMeterCurrentA !== undefined &&
       html`<${NumRow}
+        pending=${draft.has('maxMeterCurrentA')}
         k="Max meter current"
         readOnly=${!editable}
         value=${get('maxMeterCurrentA')}
         live=${lb.maxMeterCurrentA}
-        min=${bounds.minMeterCurrentA}
-        max=${bounds.maxMeterCurrentA}
+        min=${bounds.maxMeterCurrentA?.min}
+        max=${bounds.maxMeterCurrentA?.max}
         unit="A"
-        onChange=${(v) => edits.set('maxMeterCurrentA', v)}
+        onChange=${(v) => draft.set('maxMeterCurrentA', v)}
         disabled=${busy}
-        title="what the supply behind the station can carry"
+        hint="what the supply behind the station can carry"
       />`}
       ${lb.protocol !== null &&
       lb.protocol !== undefined &&
       html`<${EnumRow}
+        pending=${draft.has('protocol')}
         k="Meter protocol"
         readOnly=${!editable}
         value=${get('protocol')}
-        table=${lb.options?.protocols}
-        onChange=${(v) => edits.set('protocol', v)}
+        table=${lb.options?.protocol}
+        onChange=${(v) => draft.set('protocol', v)}
         disabled=${busy}
         includeBlank
-        title="which meter the station listens to, and over what"
+        hint="which meter the station listens to, and over what"
       />`}
       ${lb.solarMode !== null &&
       lb.solarMode !== undefined &&
       lb.solarMode !== 0 &&
-      html`<${Row} k="Solar" v=${lb.options?.solarModes?.[lb.solarMode]} />`}
+      html`<${Row} k="Solar" v=${lb.options?.solarMode?.[lb.solarMode]} />`}
     </div>
     <${Caveats}
       items=${(lb.warnings || []).map((w) => ({ short: w, detail: w }))}
     />
-    ${editable && html`<${Apply} edits=${edits} busy=${busy} onApply=${send} />`}
   <//>`;
 }
 
@@ -1044,6 +1253,11 @@ export function Dashboard({
   liveUpdates,
   onSync,
   onLicense,
+  onCloudLookup,
+  onCloudSignInStart,
+  onCloudSignInFinish,
+  onCloudSignOut,
+  cloudSignedIn,
   onControls,
   onBalancing,
   onReload,
@@ -1054,7 +1268,7 @@ export function Dashboard({
   if (!data) {
     return html`<div class="empty">
       Nothing read yet.
-      <div class="actions-row centred">
+      <div class="actions centred">
         <button class="btn primary" onClick=${onReload} disabled=${busy}>Read the charger</button>
       </div>
     </div>`;
@@ -1102,7 +1316,17 @@ export function Dashboard({
         readOnly=${readOnly}
         busy=${busy}
       />
-      <${License} license=${data.license} onInstall=${onLicense} readOnly=${readOnly} busy=${busy} />
+      <${License}
+        license=${data.license}
+        onInstall=${onLicense}
+        onCloudLookup=${onCloudLookup}
+        onCloudSignInStart=${onCloudSignInStart}
+        onCloudSignInFinish=${onCloudSignInFinish}
+        onCloudSignOut=${onCloudSignOut}
+        cloudSignedIn=${cloudSignedIn}
+        readOnly=${readOnly}
+        busy=${busy}
+      />
       <${Doctor} onDoctor=${onDoctor} busy=${busy} />
     </div>
   </div>`;

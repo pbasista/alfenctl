@@ -1,33 +1,32 @@
-"""Progress on a terminal: one live line that rewrites itself.
+"""An upgrade's progress on a terminal: the upload bar and the reboot wait.
 
-The upload bar and the reboot countdown are the same idea -- a single
-stderr line, redrawn as things move, ended with a newline when the phase
-is over.  Two things turn the live line off: a pipe (nothing would ever
-erase the escape codes) and ``--debug``, whose log lines would shred it.
-Both fall back to plain lines, which is also what a log file wants.
+The scaffolding -- the one live stderr line, the decision not to draw it
+into a pipe, closing it off when a failure lands on top of it -- is
+:class:`devicectl.cli.report.TerminalReporter`.  What is here is what an
+Alfen upgrade counts: megabytes uploaded, and a reboot that has to be polled
+for until the charger answers again.
 """
 
 from __future__ import annotations
 
 import sys
 import time
-from types import TracebackType
 
-from alfenctl.progress import (
+from devicectl.cli.report import TerminalReporter as _Terminal
+from devicectl.progress import (
     BYTES_PER_MB,
     PROGRESS_MIN_INTERVAL_S,
     bar,
-    end_live,
     fmt_duration,
-    write_live,
 )
+from devicectl.report import Wait
+
 from alfenctl.charger import AlfenCharger
-from alfenctl.report import Reporter, Wait
 from alfenctl.upgrade import wait_until_back
 
 
-class TerminalReporter(Reporter):
-    """Reports an upgrade's progress to the terminal.
+class TerminalReporter(_Terminal):
+    """Report an upgrade's progress to the terminal.
 
     Use it as a context manager: leaving the block closes off a live line
     that a failure would otherwise have left half-drawn, with the error
@@ -36,66 +35,33 @@ class TerminalReporter(Reporter):
 
     def __init__(self, *, debug: bool = False) -> None:
         """Report to stderr, drawing a live line unless ``debug`` or a pipe."""
+        super().__init__(quiet=debug)
         self.debug = debug
-        self.live = not debug and sys.stderr.isatty()
-        self._drawn = False  # a live line is on screen, awaiting its newline
-        self._last_draw = 0.0
         self._logged_poll = 0
-
-    def __enter__(self) -> TerminalReporter:
-        """Return the reporter; nothing is drawn until something happens."""
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> None:
-        """End any live line, so the next thing printed starts on its own."""
-        self._close()
-
-    def _close(self) -> None:
-        """Finish the live line, if one is on screen."""
-        if self._drawn:
-            end_live()
-            self._drawn = False
-
-    def _draw(self, text: str) -> None:
-        """Put ``text`` on the live line (no-op when there is no live line)."""
-        if not self.live:
-            return
-        write_live(text)
-        self._drawn = True
 
     # --- what the upgrade tells us ---------------------------------------------------------
 
-    def step(self, message: str) -> None:
-        """Print the new phase on a line of its own."""
-        self._close()
-        print(f"{message}...")
+    def sending(self, sent: int, total: int, elapsed_s: float, label: str = "") -> None:
+        """Redraw the transfer bar, at most every PROGRESS_MIN_INTERVAL_S.
 
-    def detail(self, message: str) -> None:
-        """Print a detail, indented under the phase it belongs to."""
-        self._close()
-        print(f"  {message}")
-
-    def warn(self, message: str) -> None:
-        """Print a warning to stderr."""
-        self._close()
-        print(f"warning: {message}", file=sys.stderr)
-
-    def sending(self, sent: int, total: int, elapsed_s: float) -> None:
-        """Redraw the upload bar, at most every PROGRESS_MIN_INTERVAL_S."""
+        ``label`` is what is moving -- a file name for a download, nothing
+        for the one upload an upgrade makes, which the phase above already
+        named.
+        """
         now = time.monotonic()
         if sent < total and now - self._last_draw < PROGRESS_MIN_INTERVAL_S:
             return  # throttle mid-stream redraws, but always draw the final 100%
         self._last_draw = now
         frac = sent / total if total else 1.0
         eta = elapsed_s * (total - sent) / sent if sent else 0.0
+        counted = (
+            f"{sent / BYTES_PER_MB:.1f}/{total / BYTES_PER_MB:.1f} MB"
+            if total
+            else f"{sent / BYTES_PER_MB:.1f} MB"
+        )
+        shown = f"[{bar(frac)}] {frac:4.0%}  " if total else ""
         self._draw(
-            f"  Uploading  [{bar(frac)}] {frac:4.0%}  "
-            f"{sent / BYTES_PER_MB:.1f}/{total / BYTES_PER_MB:.1f} MB  "
+            f"  {label or 'Uploading'}  {shown}{counted}  "
             f"elapsed {fmt_duration(elapsed_s)}  eta {fmt_duration(eta)}"
         )
 

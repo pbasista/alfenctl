@@ -51,6 +51,9 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+from devicectl import fields
+from devicectl.fields import FieldSpec
+
 from alfenctl import status
 from alfenctl.charger import AlfenCharger, LiveProperty
 from alfenctl.eds import INTEGER8, REAL32, UNSIGNED32
@@ -130,7 +133,91 @@ MIN_ALARM_TEMPERATURE_C = -40.0
 MAX_ALARM_TEMPERATURE_C = 100.0
 
 
-class ControlError(AlfenError, ValueError):
+# --- the settings ------------------------------------------------------------------------
+# The scalar half of this panel: one register each, described once for the
+# read, the document and the write.  The rest of it is not field-shaped and
+# stays by hand -- the per-socket limits are a dict of registers rather than a
+# field, the rows group each socket with what is allowing it right now, and the
+# two alarm ends have to be checked against each other rather than alone.
+#
+# ``auto_dim`` has no address because it is one bit of one: newer firmware
+# makes 0x2061 sub 1 a bit field, so the flag is read out of :attr:`auto_dim_raw`
+# and written back into it without disturbing the rest.
+FIELDS: tuple[FieldSpec, ...] = (
+    FieldSpec(
+        name="station_max_a",
+        kind=fields.NUMBER,
+        address=P_STATION_MAX_CURRENT,
+        wire=REAL32,
+        json="stationMaxCurrentA",
+        unit="A",
+        minimum=MIN_CURRENT_A,
+        maximum=MAX_CURRENT_A,
+        what="the station maximum",
+    ),
+    FieldSpec(
+        name="installation_max_a",
+        kind=fields.NUMBER,
+        address=P_INSTALLATION_MAX_CURRENT,
+        json="installationMaxCurrentA",
+        unit="A",
+        access=fields.READ_ONLY,
+    ),
+    FieldSpec(
+        name="socket_count",
+        kind=fields.INTEGER,
+        address=P_NR_SOCKETS,
+        json="socketCount",
+        access=fields.READ_ONLY,
+    ),
+    FieldSpec(
+        name="intensity",
+        kind=fields.INTEGER,
+        address=P_INTENSITY,
+        wire=INTEGER8,
+        json="intensity",
+        unit="%",
+        minimum=MIN_INTENSITY,
+        maximum=MAX_INTENSITY,
+        what="brightness",
+    ),
+    FieldSpec(
+        name="auto_dim",
+        kind=fields.FLAG,
+        json="autoDim",
+    ),
+    FieldSpec(
+        name="auto_dim_raw",
+        kind=fields.INTEGER,
+        address=P_INTENSITY_AUTO,
+        access=fields.READ_ONLY,
+    ),
+    FieldSpec(
+        name="temp_alarm_low_c",
+        kind=fields.NUMBER,
+        address=P_TEMPERATURE_ALARM_LOW,
+        wire=REAL32,
+        json="temperatureAlarmLowC",
+        unit="C",
+        minimum=MIN_ALARM_TEMPERATURE_C,
+        maximum=MAX_ALARM_TEMPERATURE_C,
+        what="the low temperature alarm",
+    ),
+    FieldSpec(
+        name="temp_alarm_high_c",
+        kind=fields.NUMBER,
+        address=P_TEMPERATURE_ALARM_HIGH,
+        wire=REAL32,
+        json="temperatureAlarmHighC",
+        unit="C",
+        minimum=MIN_ALARM_TEMPERATURE_C,
+        maximum=MAX_ALARM_TEMPERATURE_C,
+        what="the high temperature alarm",
+    ),
+)
+
+
+class ControlError(AlfenError, fields.FieldError):
     """A value that would not mean anything on the charger."""
 
 
@@ -270,21 +357,15 @@ def read(charger: AlfenCharger) -> Controls:
         }
         if allowing:
             effective[number] = allowing
-    auto_raw = _number(live, P_INTENSITY_AUTO)
-    intensity = _number(live, P_INTENSITY)
-    return Controls(
+    state = Controls(
+        **fields.harvest(FIELDS, lambda key: getattr(live.get(key), "value", None)),
         external_max_a=external,
         effective_a=effective,
-        station_max_a=_number(live, P_STATION_MAX_CURRENT),
-        installation_max_a=_number(live, P_INSTALLATION_MAX_CURRENT),
         sockets=sockets,
-        socket_count=None if count is None else int(count),
-        intensity=None if intensity is None else int(intensity),
-        auto_dim=None if auto_raw is None else bool(int(auto_raw) & AUTO_DIM_BIT),
-        auto_dim_raw=None if auto_raw is None else int(auto_raw),
-        temp_alarm_low_c=_number(live, P_TEMPERATURE_ALARM_LOW),
-        temp_alarm_high_c=_number(live, P_TEMPERATURE_ALARM_HIGH),
     )
+    raw = state.auto_dim_raw
+    state.auto_dim = None if raw is None else bool(raw & AUTO_DIM_BIT)
+    return state
 
 
 def check_current(amps: float, what: str = "current") -> float:
@@ -319,79 +400,100 @@ def check_intensity(percent: int) -> int:
     return int(percent)
 
 
+def _socket_writes(
+    asked: dict[int, Any] | None,
+    table: dict[int, tuple[int, int]],
+    writes: dict[tuple[int, int], tuple[Any, int]],
+) -> None:
+    """Add one current per socket, refusing a socket the station has not got."""
+    for number, amps in (asked or {}).items():
+        key = table.get(number)
+        if key is None:
+            raise ControlError(f"there is no socket {number} on an Alfen station")
+        writes[key] = (check_current(amps, f"socket {number}"), REAL32)
+
+
+def _alarm_writes(
+    low_asked: float | None,
+    high_asked: float | None,
+    state: Controls,
+    writes: dict[tuple[int, int], tuple[Any, int]],
+) -> None:
+    """Add whichever end of the temperature band moved, holding the pair sane.
+
+    One end can be moved on its own, and the two still have to make sense
+    afterwards, so the end that was not named comes from the charger.
+    """
+    low = state.temp_alarm_low_c if low_asked is None else low_asked
+    high = state.temp_alarm_high_c if high_asked is None else high_asked
+    if low is not None and high is not None and low >= high:
+        raise ControlError(
+            f"the low temperature alarm ({low:g} C) has to be below the "
+            f"high one ({high:g} C)"
+        )
+    if low_asked is not None:
+        writes[P_TEMPERATURE_ALARM_LOW] = (low, REAL32)
+    if high_asked is not None:
+        writes[P_TEMPERATURE_ALARM_HIGH] = (high, REAL32)
+
+
+def _auto_dim_write(
+    auto_dim: bool,
+    state: Controls,
+    writes: dict[tuple[int, int], tuple[Any, int]],
+) -> None:
+    """Flip the auto-dim bit, leaving the rest of the intensity byte alone."""
+    raw = state.auto_dim_raw or 0
+    writes[P_INTENSITY_AUTO] = (
+        (raw | AUTO_DIM_BIT) if auto_dim else (raw & ~AUTO_DIM_BIT),
+        INTEGER8,
+    )
+
+
 def apply(
     charger: AlfenCharger,
+    settings: dict[str, Any] | None = None,
     *,
-    station_max_a: float | None = None,
-    sockets: dict[int, float] | None = None,
-    external_sockets: dict[int, float] | None = None,
-    intensity: int | None = None,
-    auto_dim: bool | None = None,
-    temp_alarm_low: float | None = None,
-    temp_alarm_high: float | None = None,
     state: Controls | None = None,
+    **named: Any,
 ) -> Controls:
     """Write the settings that were named, and return the charger's new state.
 
     Everything goes in one ``POST /api/prop`` batch, so a page that changes
     the station limit and both sockets at once holds the charger for a single
-    round trip.  ``state`` is the reading the caller already has; it is only
-    needed to preserve the auto-dim field's other bits, and is re-read if it
-    was not supplied.
+    round trip.  ``state`` is the reading the caller already has; it is needed
+    to preserve the auto-dim field's other bits and to hold one end of the
+    alarm band still while the other moves, and is re-read if it was not
+    supplied.
     """
-    writes: dict[tuple[int, int], tuple[Any, int | None]] = {}
-    if station_max_a is not None:
-        writes[P_STATION_MAX_CURRENT] = (
-            check_current(station_max_a, "the station maximum"),
-            REAL32,
-        )
-    for number, amps in (sockets or {}).items():
-        key = SOCKET_MAX_CURRENT.get(number)
-        if key is None:
-            raise ControlError(f"there is no socket {number} on an Alfen station")
-        writes[key] = (check_current(amps, f"socket {number}"), REAL32)
-    for number, amps in (external_sockets or {}).items():
-        # The external request is not stored: it is what a solar or tariff
-        # controller is asking for at this moment, and the charger forgets it
-        # on the next boot.  Same range as a socket maximum, different life.
-        key = SOCKET_EXTERNAL_MAX.get(number)
-        if key is None:
-            raise ControlError(f"there is no socket {number} on an Alfen station")
-        writes[key] = (check_current(amps, f"socket {number}"), REAL32)
-    if temp_alarm_low is not None or temp_alarm_high is not None:
-        # One end can be moved on its own, and the pair still has to make
-        # sense afterwards, so the other end comes from the charger.
+    given = {**(settings or {}), **named}
+    sockets = given.pop("sockets", None)
+    external_sockets = given.pop("external_sockets", None)
+    try:
+        checked = fields.values(FIELDS, given)
+        auto_dim = checked.pop("auto_dim", None)
+        low_asked = checked.pop("temp_alarm_low_c", None)
+        high_asked = checked.pop("temp_alarm_high_c", None)
+        writes = fields.writes(FIELDS, checked)
+    except fields.FieldError as exc:
+        raise ControlError(str(exc)) from None
+
+    def reading() -> Controls:
+        """Return the caller's state, reading one the first time it is wanted."""
+        nonlocal state
         if state is None:
             state = read(charger)
-        low = (
-            check_temperature(temp_alarm_low, "the low temperature alarm")
-            if temp_alarm_low is not None
-            else state.temp_alarm_low_c
-        )
-        high = (
-            check_temperature(temp_alarm_high, "the high temperature alarm")
-            if temp_alarm_high is not None
-            else state.temp_alarm_high_c
-        )
-        if low is not None and high is not None and low >= high:
-            raise ControlError(
-                f"the low temperature alarm ({low:g} C) has to be below the "
-                f"high one ({high:g} C)"
-            )
-        if temp_alarm_low is not None:
-            writes[P_TEMPERATURE_ALARM_LOW] = (low, REAL32)
-        if temp_alarm_high is not None:
-            writes[P_TEMPERATURE_ALARM_HIGH] = (high, REAL32)
-    if intensity is not None:
-        writes[P_INTENSITY] = (check_intensity(intensity), INTEGER8)
+        return state
+
+    _socket_writes(sockets, SOCKET_MAX_CURRENT, writes)
+    # The external request is not stored: it is what a solar or tariff
+    # controller is asking for at this moment, and the charger forgets it on
+    # the next boot.  Same range as a socket maximum, different life.
+    _socket_writes(external_sockets, SOCKET_EXTERNAL_MAX, writes)
+    if low_asked is not None or high_asked is not None:
+        _alarm_writes(low_asked, high_asked, reading(), writes)
     if auto_dim is not None:
-        if state is None:
-            state = read(charger)
-        raw = state.auto_dim_raw or 0
-        writes[P_INTENSITY_AUTO] = (
-            (raw | AUTO_DIM_BIT) if auto_dim else (raw & ~AUTO_DIM_BIT),
-            INTEGER8,
-        )
+        _auto_dim_write(auto_dim, reading(), writes)
     if not writes:
         raise ControlError("nothing to set")
     charger.write_properties(writes)

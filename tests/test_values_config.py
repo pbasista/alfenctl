@@ -15,8 +15,8 @@ from alfenctl.eds import (
     BYTEARRAY,
     INTEGER8,
     REAL32,
-    UNSIGNED16,
     UNSIGNED8,
+    UNSIGNED16,
     VISIBLE_STRING,
     load_catalog,
 )

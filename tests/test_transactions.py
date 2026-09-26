@@ -206,3 +206,24 @@ def test_since_cutoff_filters_on_record_time() -> None:
     kept = tx.since_cutoff(records, datetime(2026, 8, 30))
     assert len(kept) == 1 and kept[0].kind == "start"
     assert len(tx.since_cutoff(records, None)) == 2
+
+
+def test_the_browser_groups_sessions_by_the_same_names_the_server_does() -> None:
+    """`sessions.js` re-implements `GROUPINGS`, and nothing else checks it.
+
+    The server groups the rows and sends the totals; opening a summary row
+    in the browser has to find its sessions again on that side, by the same
+    rule.  The two are written in different languages, so no import binds
+    them -- this does.  It holds the names, which is the half that can be
+    checked: a grouping added to one side and not the other is a row that
+    opens onto nothing.
+    """
+    import re
+    from pathlib import Path
+
+    js = (
+        Path(__file__).resolve().parents[1] / "src/alfenctl/web/static/js/sessions.js"
+    ).read_text(encoding="utf-8")
+    block = re.search(r"const BELONGS = \{(.*?)\n\};", js, re.S)
+    assert block is not None, "sessions.js no longer declares BELONGS"
+    assert set(re.findall(r"^\s*(\w+):", block[1], re.M)) == set(tx.GROUPINGS)

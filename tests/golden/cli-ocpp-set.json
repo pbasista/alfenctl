@@ -1,0 +1,255 @@
+[
+  {
+    "flags": [
+      "--connect-method"
+    ],
+    "action": "_StoreAction",
+    "type": "int",
+    "metavar": "N",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "how to dial out: 0 (none), 1 (wired), 2 (mobile), 3 (automatic)"
+  },
+  {
+    "flags": [
+      "--protocol"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": null,
+    "choices": [
+      "1.5",
+      "1.6",
+      "2.0.1"
+    ],
+    "default": null,
+    "required": false,
+    "help": "the OCPP version"
+  },
+  {
+    "flags": [
+      "--wired-url"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": "URL",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "the CSMS host and port, wired"
+  },
+  {
+    "flags": [
+      "--wired-path"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": "PATH",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "its path, wired"
+  },
+  {
+    "flags": [
+      "--mobile-url"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": "URL",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "the CSMS host and port, mobile"
+  },
+  {
+    "flags": [
+      "--mobile-path"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": "PATH",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "its path, mobile"
+  },
+  {
+    "flags": [
+      "--security-profile"
+    ],
+    "action": "_StoreAction",
+    "type": "int",
+    "metavar": "N",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "OCPP security: 0 (unsecured, no authentication), 1 (unsecured with basic authentication), 2 (TLS with basic authentication), 3 (TLS with a client certificate)"
+  },
+  {
+    "flags": [
+      "--cpo-name"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": "NAME",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "the operator name on the certificate"
+  },
+  {
+    "flags": [
+      "--heartbeat"
+    ],
+    "action": "_StoreAction",
+    "type": "int",
+    "metavar": "S",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "the heartbeat interval to ask for (0x2085_0; the negotiated one at 0x2086_0 is read-only)"
+  },
+  {
+    "flags": [
+      "--ping-pong"
+    ],
+    "action": "_StoreAction",
+    "type": "int",
+    "metavar": "S",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "websocket ping interval"
+  },
+  {
+    "flags": [
+      "--meter-interval"
+    ],
+    "action": "_StoreAction",
+    "type": "int",
+    "metavar": "S",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "how often to send meter values"
+  },
+  {
+    "flags": [
+      "--aligned-interval"
+    ],
+    "action": "_StoreAction",
+    "type": "int",
+    "metavar": "S",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "the clock-aligned interval"
+  },
+  {
+    "flags": [
+      "--tx-retry"
+    ],
+    "action": "_StoreAction",
+    "type": "int",
+    "metavar": "S",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "the retry interval"
+  },
+  {
+    "flags": [
+      "--tx-attempts"
+    ],
+    "action": "_StoreAction",
+    "type": "int",
+    "metavar": "N",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "transaction message attempts"
+  },
+  {
+    "flags": [
+      "--status-mode"
+    ],
+    "action": "_StoreAction",
+    "type": "int",
+    "metavar": "N",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "status notifications: 0 (immediate), 1 (immediate with a timestamp), 2 (queued)"
+  },
+  {
+    "flags": [
+      "--send-station-status"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": null,
+    "choices": [
+      "on",
+      "off"
+    ],
+    "default": null,
+    "required": false,
+    "help": "send the station's own status"
+  },
+  {
+    "flags": [
+      "--info-notifications"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": null,
+    "choices": [
+      "on",
+      "off"
+    ],
+    "default": null,
+    "required": false,
+    "help": "send informational notifications"
+  },
+  {
+    "flags": [
+      "--proxy"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": null,
+    "choices": [
+      "on",
+      "off"
+    ],
+    "default": null,
+    "required": false,
+    "help": "use an HTTP proxy"
+  },
+  {
+    "flags": [
+      "--proxy-address"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": "HOST:PORT",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "the proxy's address"
+  },
+  {
+    "flags": [
+      "--proxy-user"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": "NAME",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "the proxy user name"
+  }
+]

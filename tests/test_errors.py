@@ -9,7 +9,6 @@ import pkgutil
 import pytest
 
 import alfenctl
-
 from alfenctl.errors import AlfenError
 
 # Errors that are about a *value*, so callers can still catch them the

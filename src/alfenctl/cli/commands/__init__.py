@@ -12,21 +12,23 @@ narrower ones, then the acts that change the charger itself.
 
 from __future__ import annotations
 
-from alfenctl.cli.command import Command
+from devicectl.cli.command import Command
+
 from alfenctl.cli.commands import (
     access,
     authorization,
+    cloud,
     config,
+    connectivity,
     controls,
     doctor,
     firmware,
     license,
     loadbalancing,
     logs,
-    network,
-    ocpp,
     maintenance,
     meter,
+    ocpp,
     props,
     scn,
     stations,
@@ -45,7 +47,7 @@ GROUPS = (
     doctor,
     controls,
     loadbalancing,
-    network,
+    connectivity,
     logs,
     tags,
     authorization,
@@ -53,6 +55,7 @@ GROUPS = (
     scn,
     meter,
     license,
+    cloud,
     access,
     maintenance,
 )

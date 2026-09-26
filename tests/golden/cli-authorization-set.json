@@ -1,0 +1,183 @@
+[
+  {
+    "flags": [
+      "--mode"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": null,
+    "choices": [
+      "plug-and-charge",
+      "rfid"
+    ],
+    "default": null,
+    "required": false,
+    "help": "how a driver identifies themselves"
+  },
+  {
+    "flags": [
+      "--plug-and-charge-id"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": "ID",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "the id to report for an unidentified car"
+  },
+  {
+    "flags": [
+      "--whitelist"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": null,
+    "choices": [
+      "on",
+      "off"
+    ],
+    "default": null,
+    "required": false,
+    "help": "consult the local whitelist"
+  },
+  {
+    "flags": [
+      "--local-list"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": null,
+    "choices": [
+      "on",
+      "off"
+    ],
+    "default": null,
+    "required": false,
+    "help": "consult the OCPP local list"
+  },
+  {
+    "flags": [
+      "--restart-after-outage"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": null,
+    "choices": [
+      "on",
+      "off"
+    ],
+    "default": null,
+    "required": false,
+    "help": "resume a session after a power cut"
+  },
+  {
+    "flags": [
+      "--remote-start"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": null,
+    "choices": [
+      "on",
+      "off"
+    ],
+    "default": null,
+    "required": false,
+    "help": "accept RemoteStartTransaction from the backoffice"
+  },
+  {
+    "flags": [
+      "--stop-on-invalid-tag"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": null,
+    "choices": [
+      "on",
+      "off"
+    ],
+    "default": null,
+    "required": false,
+    "help": "stop when a tag turns out to be bad"
+  },
+  {
+    "flags": [
+      "--abort-concurrent"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": null,
+    "choices": [
+      "on",
+      "off"
+    ],
+    "default": null,
+    "required": false,
+    "help": "abort a concurrent transaction"
+  },
+  {
+    "flags": [
+      "--offline"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": null,
+    "choices": [
+      "refuse",
+      "known",
+      "any"
+    ],
+    "default": null,
+    "required": false,
+    "help": "what to do with a tag when the backoffice cannot be reached"
+  },
+  {
+    "flags": [
+      "--online-action"
+    ],
+    "action": "_StoreAction",
+    "type": "int",
+    "metavar": "N",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "what to do when it can: 0 (ask the backoffice), 1 (accept a known tag without asking), 2 (ask the backoffice, then fall back to the list), 3 (accept any tag)"
+  },
+  {
+    "flags": [
+      "--max-outage"
+    ],
+    "action": "_StoreAction",
+    "type": "int",
+    "metavar": "S",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "how long such an outage may last"
+  },
+  {
+    "flags": [
+      "--connection-timeout"
+    ],
+    "action": "_StoreAction",
+    "type": "int",
+    "metavar": "S",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "how long to wait for the car"
+  },
+  {
+    "flags": [
+      "--authorization-timeout"
+    ],
+    "action": "_StoreAction",
+    "type": "int",
+    "metavar": "S",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "how long an authorisation lasts"
+  }
+]

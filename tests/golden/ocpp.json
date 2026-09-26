@@ -1,0 +1,235 @@
+{
+  "state": {
+    "backoffice_name": "OperatorOne",
+    "connect_method": 1,
+    "protocol": "1.6",
+    "wired_url": "ws://ocpp.example:8080",
+    "wired_path": "steve",
+    "mobile_url": "ws://mobile.example:8080",
+    "mobile_path": "steve",
+    "heartbeat_s": 300,
+    "heartbeat_actual_s": 900,
+    "ping_pong_s": 60,
+    "send_timeout_s": [
+      30,
+      45
+    ],
+    "reply_timeout_s": [
+      20,
+      35
+    ],
+    "send_station_status": true,
+    "status_mode": 2,
+    "info_notifications": false,
+    "meter_interval_s": 600,
+    "aligned_interval_s": 900,
+    "tx_attempts": 3,
+    "tx_retry_s": 120,
+    "cpo_name": "Operator One B.V.",
+    "security_profile": 2,
+    "proxy_enabled": true,
+    "proxy_address": "proxy.example:3128",
+    "proxy_user": "charger",
+    "types": {
+      "8310_0": 7,
+      "8311_0": 7,
+      "8322_0": 7,
+      "8305_1": 7,
+      "8305_2": 7,
+      "8312_1": 7,
+      "8312_2": 7,
+      "10019_0": 7,
+      "10018_0": 7,
+      "8325_0": 7,
+      "8326_0": 7,
+      "8330_0": 7,
+      "8327_0": 7,
+      "8346_0": 7,
+      "8343_0": 7,
+      "8342_0": 7,
+      "8348_0": 7,
+      "8339_0": 7,
+      "8484_0": 7,
+      "8471_0": 7,
+      "8469_0": 7,
+      "8470_0": 7,
+      "8333_1": 7,
+      "8333_2": 7,
+      "8334_1": 7,
+      "8334_2": 7
+    }
+  },
+  "warnings": [
+    "the backoffice settled on a 900 s heartbeat rather than the 300 s configured"
+  ],
+  "rows": [
+    [
+      "Back office",
+      "OperatorOne"
+    ],
+    [
+      "Connect method",
+      "wired"
+    ],
+    [
+      "OCPP version",
+      "1.6"
+    ],
+    [
+      "Wired URL",
+      "ws://ocpp.example:8080/steve"
+    ],
+    [
+      "Mobile URL",
+      "ws://mobile.example:8080/steve"
+    ],
+    [
+      "Security profile",
+      "TLS with basic authentication"
+    ],
+    [
+      "CPO name",
+      "Operator One B.V."
+    ],
+    [
+      "Heartbeat",
+      "300 s (actual 900 s)"
+    ],
+    [
+      "Ping/pong",
+      "60 s"
+    ],
+    [
+      "Meter interval",
+      "600 s"
+    ],
+    [
+      "Aligned interval",
+      "900 s"
+    ],
+    [
+      "Retry interval",
+      "120 s"
+    ],
+    [
+      "Send timeout",
+      "30 s wired, 45 s mobile"
+    ],
+    [
+      "Reply timeout",
+      "20 s wired, 35 s mobile"
+    ],
+    [
+      "Message attempts",
+      "3"
+    ],
+    [
+      "Status notification",
+      "queued"
+    ],
+    [
+      "Send station status",
+      "enabled"
+    ],
+    [
+      "Informational notices",
+      "disabled"
+    ],
+    [
+      "Proxy",
+      "enabled"
+    ],
+    [
+      "  address",
+      "proxy.example:3128"
+    ],
+    [
+      "  user",
+      "charger"
+    ]
+  ],
+  "json": {
+    "backofficeName": "OperatorOne",
+    "connectMethod": 1,
+    "protocol": "1.6",
+    "wiredUrl": "ws://ocpp.example:8080",
+    "wiredPath": "steve",
+    "mobileUrl": "ws://mobile.example:8080",
+    "mobilePath": "steve",
+    "securityProfile": 2,
+    "cpoName": "Operator One B.V.",
+    "heartbeatS": 300,
+    "heartbeatActualS": 900,
+    "pingPongS": 60,
+    "meterIntervalS": 600,
+    "alignedIntervalS": 900,
+    "txRetryS": 120,
+    "sendTimeoutS": [
+      30,
+      45
+    ],
+    "replyTimeoutS": [
+      20,
+      35
+    ],
+    "txAttempts": 3,
+    "statusMode": 2,
+    "sendStationStatus": true,
+    "infoNotifications": false,
+    "proxyEnabled": true,
+    "proxyAddress": "proxy.example:3128",
+    "proxyUser": "charger",
+    "warnings": [
+      "the backoffice settled on a 900 s heartbeat rather than the 300 s configured"
+    ],
+    "options": {
+      "connectMethod": {
+        "0": "none",
+        "1": "wired",
+        "2": "mobile",
+        "3": "automatic"
+      },
+      "protocol": [
+        "1.5",
+        "1.6",
+        "2.0.1"
+      ],
+      "securityProfile": {
+        "0": "unsecured, no authentication",
+        "1": "unsecured with basic authentication",
+        "2": "TLS with basic authentication",
+        "3": "TLS with a client certificate"
+      },
+      "statusMode": {
+        "0": "immediate",
+        "1": "immediate with a timestamp",
+        "2": "queued"
+      }
+    },
+    "bounds": {
+      "heartbeatS": {
+        "min": 0,
+        "max": 86400
+      },
+      "pingPongS": {
+        "min": 0,
+        "max": 86400
+      },
+      "meterIntervalS": {
+        "min": 0,
+        "max": 86400
+      },
+      "alignedIntervalS": {
+        "min": 0,
+        "max": 86400
+      },
+      "txRetryS": {
+        "min": 0,
+        "max": 86400
+      },
+      "txAttempts": {
+        "min": 0
+      }
+    }
+  }
+}

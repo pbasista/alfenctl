@@ -8,6 +8,7 @@ license bits, not a mode anyone chose.
 """
 
 from __future__ import annotations
+
 import pytest
 
 from alfenctl import setup

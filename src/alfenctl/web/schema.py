@@ -13,9 +13,14 @@ charger said nothing, instead of the layout changing shape between polls.
 from datetime import datetime
 from typing import Any
 
+from devicectl import fields
+from devicectl.doctor import finding_json
+
 from alfenctl import (
     authorization as auth_mod,
     charging_profiles,
+    connectivity as conn_mod,
+    controls as controls_mod,
     doctor,
     loadbalancing as lb_mod,
     meter_map,
@@ -26,6 +31,7 @@ from alfenctl.authorization import Authorization
 from alfenctl.charger import ChargerInfo
 from alfenctl.charging_profiles import ChargingProfile, DirectStart
 from alfenctl.clock import Clock, format_drift, format_offset, format_zone
+from alfenctl.connectivity import Connectivity
 from alfenctl.controls import (
     MAX_ALARM_TEMPERATURE_C,
     MAX_CURRENT_A,
@@ -34,7 +40,7 @@ from alfenctl.controls import (
     MIN_CURRENT_A,
     Controls,
 )
-from alfenctl.doctor import Finding, Report
+from alfenctl.doctor import Report
 from alfenctl.hardware import Hardware
 from alfenctl.license import LicenseInfo
 from alfenctl.loadbalancing import LoadBalancing
@@ -42,7 +48,6 @@ from alfenctl.logo import DisplayInfo
 from alfenctl.logs import LogLine
 from alfenctl.master_tag import MasterTag
 from alfenctl.meter_map import RegisterMap
-from alfenctl.network import Network
 from alfenctl.ocpp import Ocpp
 from alfenctl.repo import Candidate, RemotePreset
 from alfenctl.scn import Membership
@@ -51,8 +56,8 @@ from alfenctl.setup import Setup
 from alfenctl.status import Status
 from alfenctl.transactions import Session, Totals
 from alfenctl.values import Property, format_value
-from alfenctl.wifi import Network as WifiNetwork
 from alfenctl.whitelist import Tag
+from alfenctl.wifi import Network as WifiNetwork
 
 
 def _stamp(when: datetime | None, *, timespec: str = "auto") -> str | None:
@@ -80,7 +85,16 @@ def info_json(info: ChargerInfo | None) -> dict[str, Any] | None:
 
 
 def status_json(status: Status) -> dict[str, Any]:
-    """Render a live status snapshot."""
+    """Render a live status snapshot.
+
+    Every reading ``alfenctl status --json`` reports is here, under the
+    camelCase name this side uses.  The two documents are deliberately not
+    the same -- that one drops what the charger did not say, this one keeps
+    it as ``null`` so a card holds its shape -- but they had also drifted
+    apart in *content*, and a socket in an error state reached the terminal
+    with the code and the severity and reached the browser without them.
+    ``test_status_reports_the_same_readings_both_ways`` holds them level.
+    """
     return {
         "sockets": [
             {
@@ -89,9 +103,15 @@ def status_json(status: Status) -> dict[str, Any]:
                 "mode3": socket.mode3_state,
                 "led": socket.led_state,
                 "power": socket.power_state,
+                "display": socket.device_state,
+                "errorCode": socket.error_code,
+                "error": socket.error_text,
+                "errorSeverity": socket.error_severity,
+                "operative": socket.operative,
             }
             for socket in status.sockets
         ],
+        "stationOperative": status.station_operative,
         "temperatureC": status.temperature_c,
         "temperatureAlarm": list(status.temperature_alarm),
         "maxStationCurrentA": status.max_station_current_a,
@@ -145,17 +165,11 @@ def controls_json(state: Controls | None) -> dict[str, Any] | None:
     if state is None:
         return None
     return {
-        "stationMaxCurrentA": state.station_max_a,
-        "installationMaxCurrentA": state.installation_max_a,
+        **fields.document(controls_mod.FIELDS, state),
         "sockets": [
             {"number": number, "maxCurrentA": amps}
             for number, amps in sorted(state.sockets.items())
         ],
-        "socketCount": state.socket_count,
-        "intensity": state.intensity,
-        "autoDim": state.auto_dim,
-        "temperatureAlarmLowC": state.temp_alarm_low_c,
-        "temperatureAlarmHighC": state.temp_alarm_high_c,
         "minAlarmTemperatureC": MIN_ALARM_TEMPERATURE_C,
         "maxAlarmTemperatureC": MAX_ALARM_TEMPERATURE_C,
         "minCurrentA": MIN_CURRENT_A,
@@ -185,80 +199,6 @@ def firmware_json(cand: Candidate) -> dict[str, Any]:
         "warnings": list(cand.warnings),
         "summary": cand.summary,
     }
-
-
-def client_json(client: dict[str, Any]) -> dict[str, Any]:
-    """One watching browser, with its user agent read into something short."""
-    return {
-        "id": client.get("id"),
-        "address": client.get("address") or "",
-        "port": client.get("port"),
-        "agent": client.get("agent") or "",
-        "label": describe_agent(str(client.get("agent") or "")),
-        "since": client.get("since"),
-    }
-
-
-# Enough of a user-agent reading to tell two browsers on the same machine
-# apart, in the order that matters: Edge and Opera both claim Chrome, Chrome
-# claims Safari, and every Android is also a Linux.
-_BROWSERS = (
-    ("Edg/", "Edge"),
-    ("OPR/", "Opera"),
-    ("Firefox/", "Firefox"),
-    ("Chrome/", "Chrome"),
-    ("Safari/", "Safari"),
-    ("curl/", "curl"),
-)
-_SYSTEMS = (
-    ("Android", "Android"),
-    ("iPhone", "iPhone"),
-    ("iPad", "iPad"),
-    ("Windows", "Windows"),
-    ("Macintosh", "macOS"),
-    ("CrOS", "ChromeOS"),
-    ("X11", "Linux"),
-    ("Linux", "Linux"),
-)
-
-
-# Addresses not worth naming: a tab on this machine is the ordinary case.
-LOOPBACK = ("127.0.0.1", "::1", "localhost")
-
-
-def describe_agent(agent: str) -> str:
-    """Return a short name for a browser ("Firefox on Linux")."""
-    if not agent.strip():
-        return "unknown client"
-    browser = next((name for token, name in _BROWSERS if token in agent), "")
-    system = next((name for token, name in _SYSTEMS if token in agent), "")
-    if browser and system:
-        return f"{browser} on {system}"
-    return browser or system or agent.split()[0][:40]
-
-
-def name_watchers(clients: list[dict[str, Any]]) -> list[str]:
-    """Name the browsers on the stream: one line each, oldest first.
-
-    Two tabs of one browser share a user agent and an address, so they are
-    counted together rather than listed twice.  A watcher somewhere else on
-    the network is named with the address it came from, which is the part
-    that tells it from a tab of my own.  The user agent is a stranger's
-    header and these lines are printed to a terminal, so anything
-    unprintable in it is dropped.
-    """
-    counted: dict[str, int] = {}
-    for client in clients:
-        label = describe_agent(str(client.get("agent") or ""))
-        address = str(client.get("address") or "")
-        if address and address not in LOOPBACK:
-            label = f"{label} at {address}"
-        label = "".join(ch for ch in label if ch.isprintable())
-        counted[label] = counted.get(label, 0) + 1
-    return [
-        f"{label} ({count} tabs)" if count > 1 else label
-        for label, count in counted.items()
-    ]
 
 
 def hardware_json(hardware: Hardware | None) -> list[dict[str, str]]:
@@ -304,15 +244,57 @@ def license_json(
         "raw": license_info.features_raw,
         "features": [
             {"name": name, "on": installed}
-            for name, installed in license_info.feature_states(
-                ahp=family == "AHP", dc=family.startswith("DC")
-            )
+            for name, installed in license_info.feature_states(ahp=family == "AHP")
         ],
         "supported": not (
             license_info.license_key is None
             and license_info.features_raw is None
             and family != "AHP"
         ),
+    }
+
+
+def cloud_json(
+    identifier: str,
+    sockets: int,
+    *,
+    user: dict[str, Any] | None,
+    warranty: dict[str, Any] | None,
+    registered_key: str | None,
+    installed_key: str | None,
+    recorded: dict[str, Any] | None = None,
+    defaults: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Render what Alfen's servers hold about one station, for the UI.
+
+    ``registeredKey`` is what Alfen has on file; ``installedKey`` is what the
+    charger currently carries, so the page can tell whether installing would
+    change anything before it offers the button.  ``recorded`` is the newest
+    change Alfen has logged for the serial and how many records exist, and
+    ``defaults`` is the full factory-default property profile (already
+    decorated with each property's title), so the page can show every value
+    the manufacturer holds, not just the summary.
+    """
+    profile = (user or {}).get("profileInformation") or {}
+    account = " ".join(
+        p for p in (profile.get("firstName"), profile.get("lastName")) if p
+    )
+    return {
+        "identifier": identifier,
+        "sockets": sockets,
+        "account": account or (user or {}).get("uuid"),
+        "company": profile.get("company"),
+        "phone": profile.get("phoneNumber"),
+        "warrantyType": (warranty or {}).get("warrantyType"),
+        "warrantyEnddate": (warranty or {}).get("warrantyEnddate"),
+        "records": (recorded or {}).get("totalCount"),
+        "lastRecorded": (recorded or {}).get("lastUpdate"),
+        "registeredKey": registered_key,
+        "installedKey": installed_key,
+        "matches": bool(
+            registered_key and installed_key and registered_key == installed_key
+        ),
+        "defaults": defaults or [],
     }
 
 
@@ -382,57 +364,24 @@ def log_json(line: LogLine) -> dict[str, Any]:
 def loadbalancing_json(state: LoadBalancing | None) -> dict[str, Any] | None:
     """Render the load-balancing and solar settings, with the option tables.
 
-    The option tables ride along so a card can offer the vendor app's own
-    dropdowns without the browser having to know a second copy of them.
+    The option tables and the bounds ride along so a card can offer the vendor
+    app's own dropdowns, and hold its sliders to the ranges a write is checked
+    against, without the browser having to know a second copy of either.  Both
+    come off the field table, so they cannot disagree with what ``apply``
+    enforces.
     """
     if state is None:
         return None
     return {
-        "modeRaw": state.mode_raw,
+        **fields.document(lb_mod.FIELDS, state),
         "modeLabel": state.mode_label,
-        "static": state.static,
-        "active": state.active,
-        "maxMeterCurrentA": state.max_meter_current_a,
-        "safeCurrentA": state.safe_current_a,
-        "phaseRotation": state.phase_rotation,
-        "measurementIncludesEv": state.measurement_includes_ev,
-        "maxImbalanceA": state.max_imbalance_a,
-        "phaseSwitching": state.phase_switching,
-        "maxAllowedPhases": state.max_allowed_phases,
-        "dataSource": state.data_source,
-        "protocol": state.protocol,
-        "p1Interface": state.p1_interface,
-        "p1Address": state.p1_address,
-        "p1Port": state.p1_port,
-        "solarMode": state.solar_mode,
-        "solarGreenShare": state.solar_green_share,
-        "solarComfortW": state.solar_comfort_w,
         "solarBoost": {str(k): v for k, v in state.solar_boost.items()},
         "licensedStatic": state.licensed_static,
         "licensedActive": state.licensed_active,
         "licensedScn": state.licensed_scn,
         "warnings": state.warnings(),
-        "options": {
-            "protocols": {str(k): v for k, v in lb_mod.PROTOCOLS.items()},
-            "dataSources": {str(k): v for k, v in lb_mod.DATA_SOURCES.items()},
-            "p1Interfaces": {str(k): v for k, v in lb_mod.P1_INTERFACES.items()},
-            "solarModes": {str(k): v for k, v in lb_mod.SOLAR_MODES.items()},
-            "phaseRotations": list(lb_mod.PHASE_ROTATIONS),
-            "measurementSources": {
-                str(k): v for k, v in lb_mod.MEASUREMENT_SOURCES.items()
-            },
-        },
-        "bounds": {
-            "minSafeCurrentA": lb_mod.MIN_SAFE_CURRENT_A,
-            "maxSafeCurrentA": lb_mod.MAX_SAFE_CURRENT_A,
-            "minMeterCurrentA": lb_mod.MIN_METER_CURRENT_A,
-            "maxMeterCurrentA": lb_mod.MAX_METER_CURRENT_A,
-            "minGreenShare": lb_mod.MIN_GREEN_SHARE,
-            "maxGreenShare": lb_mod.MAX_GREEN_SHARE,
-            "minComfortW": lb_mod.MIN_COMFORT_W,
-            "maxComfortW": lb_mod.MAX_COMFORT_W,
-            "allowedPhases": list(lb_mod.ALLOWED_PHASES),
-        },
+        "options": fields.option_tables(lb_mod.FIELDS),
+        "bounds": fields.bounds(lb_mod.FIELDS),
     }
 
 
@@ -441,25 +390,10 @@ def authorization_json(state: Authorization | None) -> dict[str, Any] | None:
     if state is None:
         return None
     return {
-        "mode": state.mode,
-        "plugAndChargeId": state.plug_and_charge_id,
-        "whitelistEnabled": state.whitelist_enabled,
-        "localListEnabled": state.local_list_enabled,
-        "restartAfterOutage": state.restart_after_outage,
-        "maxOutageS": state.max_outage_s,
-        "remoteTxRequests": state.remote_tx_requests,
-        "stopOnInvalidTag": state.stop_on_invalid_tag,
-        "abortConcurrent": state.abort_concurrent,
-        "connectionTimeoutS": state.connection_timeout_s,
-        "authorizationTimeoutS": state.authorization_timeout_s,
-        "onlineAction": state.online_action,
-        "offlineAction": state.offline_action,
+        **fields.document(auth_mod.FIELDS, state),
         "warnings": state.warnings(),
-        "options": {
-            "modes": {str(k): v for k, v in auth_mod.MODES.items()},
-            "offlineActions": {str(k): v for k, v in auth_mod.OFFLINE_ACTIONS.items()},
-            "onlineActions": {str(k): v for k, v in auth_mod.ONLINE_ACTIONS.items()},
-        },
+        "options": fields.option_tables(auth_mod.FIELDS),
+        "bounds": fields.bounds(auth_mod.FIELDS),
     }
 
 
@@ -468,39 +402,10 @@ def ocpp_json(state: Ocpp | None) -> dict[str, Any] | None:
     if state is None:
         return None
     return {
-        "backofficeName": state.backoffice_name,
-        "connectMethod": state.connect_method,
-        "protocol": state.protocol,
-        "wiredUrl": state.wired_url,
-        "wiredPath": state.wired_path,
-        "mobileUrl": state.mobile_url,
-        "mobilePath": state.mobile_path,
-        "heartbeatS": state.heartbeat_s,
-        "heartbeatActualS": state.heartbeat_actual_s,
-        "pingPongS": state.ping_pong_s,
-        "sendTimeoutS": list(state.send_timeout_s),
-        "replyTimeoutS": list(state.reply_timeout_s),
-        "sendStationStatus": state.send_station_status,
-        "statusMode": state.status_mode,
-        "infoNotifications": state.info_notifications,
-        "meterIntervalS": state.meter_interval_s,
-        "alignedIntervalS": state.aligned_interval_s,
-        "txAttempts": state.tx_attempts,
-        "txRetryS": state.tx_retry_s,
-        "cpoName": state.cpo_name,
-        "securityProfile": state.security_profile,
-        "proxyEnabled": state.proxy_enabled,
-        "proxyAddress": state.proxy_address,
-        "proxyUser": state.proxy_user,
+        **fields.document(ocpp_mod.FIELDS, state),
         "warnings": state.warnings(),
-        "options": {
-            "connectMethods": {str(k): v for k, v in ocpp_mod.CONNECT_METHODS.items()},
-            "protocols": list(ocpp_mod.PROTOCOLS),
-            "securityProfiles": {
-                str(k): v for k, v in ocpp_mod.SECURITY_PROFILES.items()
-            },
-            "statusModes": {str(k): v for k, v in ocpp_mod.STATUS_MODES.items()},
-        },
+        "options": fields.option_tables(ocpp_mod.FIELDS),
+        "bounds": fields.bounds(ocpp_mod.FIELDS),
     }
 
 
@@ -522,33 +427,16 @@ def master_tag_json(state: MasterTag | None) -> dict[str, Any] | None:
     return {"supported": state.supported, "enabled": state.enabled, "tag": state.tag}
 
 
-def network_json(state: Network | None) -> dict[str, Any] | None:
-    """Render the network state, per interface, with the option tables."""
+def connectivity_json(state: Connectivity | None) -> dict[str, Any] | None:
+    """Render every interface's address and state, with the option tables."""
     if state is None:
         return None
     return {
+        **fields.document(conn_mod.FIELDS, state),
         "hasWifi": state.has_wifi,
-        "wifiEnabled": state.wifi_enabled,
-        "wifiSsid": state.wifi_ssid,
-        "wifiSecurity": state.wifi_security,
-        "wifiRssi": state.wifi_rssi,
-        "wifiStatus": state.wifi_status,
-        "wifiStationStatus": state.wifi_station_status,
-        "wifiApEnabled": state.wifi_ap_enabled,
-        "wifiApStatus": state.wifi_ap_status,
-        "wifiAddress": state.wifi_address,
         "scanObstacle": state.scan_obstacle(),
-        "mac": state.mac,
-        "wiredAddress": state.wired_address,
-        "wiredFixed": state.wired_fixed,
         "wired": state.wired,
-        "mobileAddress": state.mobile_address,
-        "signalStrength": state.signal_strength,
-        "imsi": state.imsi,
-        "iccid": state.iccid,
-        "apn": state.apn,
-        "networkMode": state.network_mode,
-        "networkTechnology": state.network_technology,
+        "options": fields.option_tables(conn_mod.FIELDS),
         "rows": [{"label": k, "value": v} for k, v in state.rows()],
     }
 
@@ -618,16 +506,6 @@ def totals_json(row: Totals) -> dict[str, Any]:
         "incomplete": row.incomplete,
         "first": _stamp(row.first, timespec="seconds"),
         "last": _stamp(row.last, timespec="seconds"),
-    }
-
-
-def finding_json(finding: Finding) -> dict[str, Any]:
-    """One doctor finding."""
-    return {
-        "severity": finding.severity,
-        "area": finding.area,
-        "detail": finding.detail,
-        "fix": finding.fix,
     }
 
 

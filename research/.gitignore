@@ -12,4 +12,5 @@
 !/windows/windows-guide.md
 !/windows/windows-findings.md
 /artifacts/
-/firmware/
+/firmware/*
+!/firmware/firmware-findings.md

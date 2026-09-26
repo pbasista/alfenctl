@@ -17,15 +17,23 @@ build date and only jumps forward once something sets it, so an unsynced
 station stamps its event log and its transaction records with a time that
 may be years out -- and firmware signature validation checks certificate
 validity against that same clock, which is why an upload sets it too (see
-``AlfenCharger.set_datetime``).
+:func:`set`, which :mod:`alfenctl.upgrade` calls before every image).
 """
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+import httpx
+from devicectl.clock import (
+    DRIFT_NOISE_S as _DRIFT_NOISE_S,
+    format_drift as _format_drift,
+)
+
 from alfenctl.charger import AlfenCharger, LiveProperty
+from alfenctl.eds import UNSIGNED64
 
 P_DATE_TIME = (0x2059, 0)  # 8281 sysDateTime, ms since the Unix epoch (UTC)
 P_TIME_ZONE = (0x205A, 0)  # 8282 sysTimeZone, in units of six minutes
@@ -39,15 +47,16 @@ MS_PER_SECOND = 1000
 # in whole minutes.  Newer firmware carries both, and the minutes one wins.
 TIME_ZONE_STEP_MINUTES = 6
 
-# Below this the clocks are as good as identical.  The charger is told the
+# Below this the clocks are as good as identical: the charger is told the
 # time in whole seconds, so it can never be nearer than half a second, and
-# what is left after that is the jitter of the read itself.
-DRIFT_NOISE_S = 2.0
+# what is left after that is the jitter of the read itself.  The figure is
+# shared with jkctl, which says "in sync" at the same point.
+DRIFT_NOISE_S = _DRIFT_NOISE_S
 
-SECONDS_PER_MINUTE = 60
-SECONDS_PER_HOUR = 3600
-SECONDS_PER_DAY = 86400
-SECONDS_PER_YEAR = 365 * SECONDS_PER_DAY
+# The clock command carries whole seconds and is applied when it arrives, so
+# it is aimed at half a round trip ahead -- the usual estimate of the one-way
+# delay.  Capped, so one slow response cannot throw the clock forwards.
+MAX_CLOCK_LEAD_S = 2.0
 
 
 @dataclass(frozen=True)
@@ -127,14 +136,54 @@ def read(charger: AlfenCharger) -> Clock:
     )
 
 
-def sync(charger: AlfenCharger, *, is_ahp: bool = False) -> datetime:
-    """Set the charger's clock to this computer's, and return what was sent.
+def set(  # the verb this module's subject takes
+    charger: AlfenCharger, when: datetime | None = None, *, is_ahp: bool = False
+) -> datetime:
+    """Set the charger's clock, and return the moment it was set to.
 
-    The moment is not chosen here: :meth:`AlfenCharger.set_datetime` stamps
-    each request as it goes out, which is the only way the charger ends up
-    on time rather than one round trip behind.
+    Mirrors ``ICULanDevice.SetDate``, which does two things: it writes
+    ``sysDateTime`` (:data:`P_DATE_TIME`, milliseconds since the Unix epoch)
+    and then tells the firmware separately
+    (:meth:`AlfenCharger.send_clock`).
+
+    Sending "now" means the moment each request leaves, not the moment this
+    function was entered: the command is what actually moves the clock, and
+    it goes out one whole property-write round trip later.  Stamping both
+    from a single reading left the charger a couple of seconds behind for as
+    long as it ran afterwards -- exactly the round trip.  The command's
+    whole-second field is rounded rather than truncated for the same reason,
+    and aimed :data:`MAX_CLOCK_LEAD_S`-capped half a round trip ahead so it
+    is right when it lands.  An explicit ``when`` is used as given: a caller
+    naming an instant means that one.
     """
-    return charger.set_datetime(is_ahp=is_ahp)
+    pinned = None if when is None else when.astimezone(timezone.utc)
+    first = pinned or datetime.now(timezone.utc)
+    started = time.monotonic()
+    round_trip = 0.0
+    try:
+        charger.write_properties(
+            {P_DATE_TIME: (int(first.timestamp() * MS_PER_SECOND), UNSIGNED64)}
+        )
+        round_trip = time.monotonic() - started
+    except httpx.HTTPStatusError:
+        # Firmware that does not expose the property still takes the command
+        # below, which is what actually moves the clock.
+        pass
+    if pinned is not None:
+        moment = pinned
+    else:
+        lead = min(round_trip / 2, MAX_CLOCK_LEAD_S)
+        moment = datetime.now(timezone.utc) + timedelta(seconds=lead + 0.5)
+    # The stamp carries whole seconds; keep the returned moment to the same
+    # resolution so it says what the charger was actually told.
+    moment = moment.replace(microsecond=0)
+    charger.send_clock(moment.strftime("%Y-%m-%d %H:%M:%S"), is_ahp=is_ahp)
+    return moment
+
+
+def sync(charger: AlfenCharger, *, is_ahp: bool = False) -> datetime:
+    """Set the charger's clock to this computer's, and return what was sent."""
+    return set(charger, is_ahp=is_ahp)
 
 
 def format_offset(offset: timedelta | None) -> str:
@@ -163,23 +212,12 @@ def format_zone(state: Clock) -> str:
 def format_drift(drift: timedelta | None) -> str:
     """Render the difference between the two clocks in words.
 
-    The scale matters here: an unsynced charger is not seconds out but
-    years, since it boots with its RTC at the firmware build date.
+    The phrase is :func:`devicectl.clock.format_drift`'s -- "12 seconds
+    ahead", "2.5 years behind" -- which is what jkctl says about a battery's
+    clock as well.  It no longer ends "of this computer": the page is read
+    from other machines than the one running this program.  What is this
+    program's is the sentence for a charger with no time to compare.
     """
     if drift is None:
         return "<charger reports no time>"
-    seconds = drift.total_seconds()
-    if abs(seconds) < DRIFT_NOISE_S:
-        return "in sync with this computer"
-    size = abs(seconds)
-    if size < SECONDS_PER_MINUTE:
-        amount = f"{size:.0f} seconds"
-    elif size < SECONDS_PER_HOUR:
-        amount = f"{size / SECONDS_PER_MINUTE:.0f} minutes"
-    elif size < SECONDS_PER_DAY:
-        amount = f"{size / SECONDS_PER_HOUR:.1f} hours"
-    elif size < SECONDS_PER_YEAR:
-        amount = f"{size / SECONDS_PER_DAY:.1f} days"
-    else:
-        amount = f"{size / SECONDS_PER_YEAR:.1f} years"
-    return f"{amount} {'ahead of' if seconds > 0 else 'behind'} this computer"
+    return _format_drift(drift.total_seconds()) or ""

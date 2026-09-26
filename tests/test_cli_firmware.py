@@ -49,7 +49,7 @@ def offered(monkeypatch, tmp_path: Path):
     """Serve PUBLISHED as the server's listing; downloads land in tmp_path."""
     _publish(monkeypatch, PUBLISHED)
 
-    def fake_download(fw, family, *, config=None, cache_dir=None, on_progress=None):
+    def fake_download(fw, family, *, config=None, cache_dir=None, report=None):
         path = (cache_dir or tmp_path) / fw.name
         path.write_bytes(make_fwi())
         return path

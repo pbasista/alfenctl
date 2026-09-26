@@ -8,12 +8,13 @@ the gap named at the end rather than passed over.
 from __future__ import annotations
 
 import argparse
-import json
+
+from devicectl.cli.command import Command
 
 from alfenctl import doctor
 from alfenctl.charger import AlfenCharger
-from alfenctl.cli.command import Command
 from alfenctl.cli.exits import EXIT_ERROR, EXIT_OK
+from alfenctl.cli.output import print_json
 
 MARKS = {doctor.ERROR: "!!", doctor.WARNING: " !", doctor.NOTE: "  "}
 
@@ -40,7 +41,7 @@ def cmd_doctor(charger: AlfenCharger, args: argparse.Namespace) -> int:
     info = charger.basic_info()
     report = doctor.run(charger)
     if args.json:
-        print(json.dumps(_json(report), indent=2))
+        print_json(_json(report))
         return EXIT_ERROR if report.worst == doctor.ERROR else EXIT_OK
 
     print(f"{info.object_id} ({info.model}), firmware {info.firmware}\n")
@@ -79,4 +80,4 @@ def add_parsers(
     sp.add_argument("--json", action="store_true", help="JSON instead of a report")
 
 
-COMMANDS: dict[str, Command] = {"doctor": Command(cmd_doctor)}
+COMMANDS: dict[str, Command] = {"doctor": Command(cmd_doctor, fans_out=True)}

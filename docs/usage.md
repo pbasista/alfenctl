@@ -648,14 +648,14 @@ Charger clock:
 
   Charger (UTC)  2024-03-01 09:15:00
   This computer  2026-09-04 21:08:28
-  Difference     2.5 years behind this computer
+  Difference     2.5 years behind
   Time zone      UTC+01:00, daylight saving on
   Charger local  2024-03-01 10:15:00
 
 Set it from this computer with: alfenctl time sync
 
 $ alfenctl time sync --station garage
-ACE0781464's clock set to 2026-09-04 21:08:28 UTC (it was 2.5 years behind this computer).
+ACE0781464's clock set to 2026-09-04 21:08:28 UTC (it was 2.5 years behind).
 ```
 
 Setting it is two writes, both of which the app makes (`ICULanDevice
@@ -767,12 +767,17 @@ $ alfenctl tags master --clear --station garage         # clear the tag id
 $ alfenctl tags master --disable --station garage        # keep the tag, turn the mode off
 ```
 
-### The network
+### Connectivity
 
-`alfenctl network` says where the charger is: its Ethernet address and how
-it got one, the Wi-Fi station and access point, and the modem block. It is
-read-only on purpose — writing an interface's own address is how a station
-is lost, so that stays an explicit `alfenctl set 207D_2 …`.
+`alfenctl connectivity` says where the charger is reachable: its Ethernet
+address and how it got one, the Wi-Fi station and access point, and the modem
+block. It is read-only on purpose — writing an interface's own address is how
+a station is lost, so that stays an explicit `alfenctl set 207D_2 …`.
+
+It was `alfenctl network` until the web interface had to stop calling its tab
+that: on a page — and in a tool — about charging stations, a *network* is the
+charging network an operator runs them on, which is what `scn` and `ocpp` are
+about. One name in both halves.
 
 `alfenctl wifi` asks the charger's own radio what it can see, and then joins
 one, rather than leaving the SSID and passphrase to be typed blind:
@@ -803,13 +808,13 @@ listening, so with `sysWifiEnabled` (`0x3284_0`) clear there is nothing to
 listen with: `/api/wifiscan` answers an empty list, quickly, and it reads
 like an empty band. The vendor's own installer has the same behaviour and
 simply greys its *Scan Wi-Fi networks* button out while the flag is clear.
-`alfenctl network` shows both halves — the flag and the radio's own
+`alfenctl connectivity` shows both halves — the flag and the radio's own
 `wifiStatus` — and a scan that comes back empty says which one is in the
 way:
 
 ```console
-$ alfenctl network --station garage
-Network
+$ alfenctl connectivity --station garage
+Connectivity
   Ethernet MAC       AA:BB:CC:DD:EE:FF
   Ethernet address   192.168.11.42 (DHCP)
   Wi-Fi              disabled
@@ -1004,3 +1009,55 @@ to be unreachable right now. A member that stays unreachable through a
 reachable again or resynced by hand (`alfenctl get`/`set` on `2180_3` and
 friends) — there is no way to tell those two cases apart without a login.
 
+## Console commands and diagnostic transport
+
+`alfenctl cmd --list` prints a catalog of 22 command strings documented in
+vendor clients and an NG910 log, without connecting to a station. The web
+console uses the same catalog. `cmd` prompts before submitting a command:
+
+```console
+$ alfenctl cmd --list
+$ alfenctl cmd 'scninfo' --station garage
+```
+
+Command availability and authorization depend on the installed firmware.
+MyEve limits advanced choices to the station's Secure Service Access (SSA)
+login role, which is separate from owner/admin access. In reported
+NG910-60027 operation, `flash-info` and `flash-dump` produced no observable
+action or log output. HTTP success acknowledges submission rather than
+execution; inspect the charger log for command output. Dumps may contain
+sensitive data, and erase, test, reset, and tamper commands can disrupt
+charging or configuration. `-y` skips the confirmation prompt; station
+authorization still applies.
+
+Diagnostics use a separate protocol. To submit a diagnostic documented for
+the station's firmware:
+
+```sh
+alfenctl diag send --station garage --sequence-id 7 "$DIAGNOSTIC" "$PARAM"
+alfenctl diag result --station garage
+```
+
+`DIAGNOSTIC` and `PARAM` are shell variables containing the command name and
+parameter from the firmware-specific specification. Parameters are optional,
+ordered strings; quote values containing spaces. Supply `--sequence-id`
+using the protocol's byte range (0–255). `send` prompts before submission
+unless given `-y`.
+
+The client posts `{"command":"…","sequenceID":"7","parameters":[{"param0":"…"}]}`
+to `/api/diagtool`, matching the Windows client. With no parameters the array
+is empty. `result` makes one `GET /api/diagtool?result` request and prints its
+JSON without normalizing key spelling, flags, or vendor-specific fields.
+Match `DiagnosticResult`'s command and sequence ID and inspect its finished
+flag before using the result: it may describe an earlier request or an
+operation still in progress. Result retrieval does not poll for completion.
+
+The inspected clients define the diagnostic transport without a command
+catalog. Command names, parameter meanings, and result formats depend on
+the firmware. Like console commands, diagnostics may change charger state
+and remain subject to station authorization.
+
+The web UI provides the same operations under **Actions → Diagnostics**.
+Each parameter has its own input field, preserving spaces and empty values
+without shell quoting. Submission requires confirmation; result retrieval
+is separate and remains available in read-only mode.

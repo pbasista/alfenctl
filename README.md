@@ -1,9 +1,13 @@
 # alfenctl
 
-A command-line tool for Alfen EV charging stations on your local network:
-discover them, inspect and change **every** property, back up and restore
-their configuration, upgrade firmware, and upload a custom splash-screen
-logo.
+A tool for Alfen EV charging stations on your local network: discover them,
+inspect and change **every** property, back up and restore their
+configuration, upgrade firmware, and upload a custom splash-screen logo.
+
+**It is a web interface first.** `alfenctl`, with nothing after it, serves a
+page on this machine and opens a browser on it — that is the default mode of
+operation and how most people will use it. Everything the page does is also
+a command you can type, for a script or a terminal.
 
 A small, clean Python reimplementation of the useful core of Alfen's Windows
 **ACE Service Installer**, reverse-engineered from the v4.3.0 binary (and its
@@ -11,11 +15,20 @@ bundled property catalog and resource blobs) and verified against a live NG910
 charger (firmware 7.4.5). No Alfen cloud account is involved — everything
 happens on your LAN, directly against the charger.
 
-## There is a web interface too
+## The web interface, which is what it does by default
 
-`alfenctl ui` serves the same code from your own machine: a live dashboard
-of what the charger is doing, and a tab for each job the command line does.
-Nothing to build, no account, no cloud — one command and a browser tab.
+```console
+$ alfenctl
+alfenctl ui is serving on http://127.0.0.1:8088/
+  press Ctrl+C to stop
+```
+
+`alfenctl` on its own is `alfenctl ui`: a live dashboard of what the charger
+is doing, and a tab for each job the command line does. Nothing to build, no
+account, no cloud — one command and a browser tab. Options for it can be
+given straight after the bare name (`alfenctl --station garage`, `alfenctl
+--listen 0.0.0.0:8088 --read-only`), and `alfenctl ui` spelled out does the
+same thing.
 
 [![The alfenctl dashboard: sockets, a live power chart, temperature and display settings, load balancing, station details and the licensed features](https://raw.githubusercontent.com/pbasista/alfenctl/main/docs/images/dashboard.png)](https://github.com/pbasista/alfenctl/blob/main/docs/web-ui.md)
 
@@ -33,11 +46,11 @@ first option — it brings its own.
 
 ```console
 $ uv tool install alfenctl
-$ alfenctl list
+$ alfenctl
 ```
 
-`uvx alfenctl list` runs it once without installing anything at all, which
-is a fair way to see whether it finds your charger.
+`uvx alfenctl` runs it once without installing anything at all, which is a
+fair way to see whether it finds your charger.
 
 **With a Python you already have**, [pipx] gives the same isolated install:
 
@@ -50,6 +63,16 @@ mean to import `alfenctl` from your own code; for a command you type, an
 isolated install saves you the dependency conflicts.
 
 ### First run
+
+```console
+$ alfenctl                               # the web interface, in a browser
+```
+
+That is the whole of it: the page opens on the Fleet -- every charger this
+machine can see, one tile each -- you click the one you mean, and everything
+else is a tab. Nothing needs to exist first.
+
+The same things from a terminal, for a script or an ssh session:
 
 ```console
 $ alfenctl list                          # what is on this network
@@ -85,8 +108,9 @@ than typing them thirty times.
 | `list` | discover Alfen chargers on the LAN (mDNS) |
 | `info` | show a charger's identity, model, firmware, sockets, board revisions, RFID readers, modem and clock |
 | `config [ACTION]` | `show` what alfenctl reads from `alfen.toml`, without the passwords (the default); `path` prints where it looks; `init` writes a commented starter file |
-| `ui` | serve the web interface in a browser: a dashboard of what the charger is doing, and tabs mirroring the CLI -- charging (load balancing, profiles, SCN), access (authorization, tags, passwords), network, backoffice, history (sessions and the log), every property, backup/restore/presets, and the actions (`--listen`, `--read-only`) |
+| `ui` | **what `alfenctl` alone does**: serve the web interface in a browser -- the fleet of chargers this machine can see, a dashboard of what the chosen one is doing, and tabs mirroring the CLI -- charging (load balancing, profiles, SCN), access (authorization, tags, passwords), connectivity (interfaces and Wi-Fi), backoffice, history (sessions and the log), every property, backup/restore/presets, and the actions (`--listen`, `--read-only`) |
 | `license [ACTION]` | `show` licensed features and the key (the default), or `set KEY` to install a new one |
+| `cloud [ACTION]` | ask Alfen's servers what they hold about a station: `info` (the default) shows the account, warranty and the registered license key; `license [--install]` fetches that key and can write it to the charger; `login` signs in and caches a token |
 | `status` | what the charger is doing right now: socket state, what its screen is showing and any error behind it, which sockets are in service, meter, energy delivered, temperature (`--json`, `--watch [S]` to keep it updating) |
 | `current [ACTION]` | `show` the charging current limits (the default), or `set AMPS` one — per socket, `--station-max` for the whole station, or `--external` for the live request a solar or tariff controller drives |
 | `socket [ACTION]` | `show` which sockets are in service (the default), or `enable`/`disable` one — a read-modify-write of the bit field they share |
@@ -107,7 +131,7 @@ than typing them thirty times.
 | `ocpp [ACTION]` | `show` the backoffice connection (the default), or `set` it: URLs, protocol, heartbeat, timeouts, proxy |
 | `password ACTION` | `set` a new login password, `temporary` one that expires, `recover` with the code on the charger, or `pin` for the Eve Connect app's access PIN |
 | `wifi [ACTION]` | `scan` for nearby networks (the default; `--enable` switches the radio on first, without which a scan finds nothing), `connect SSID [--psk …]` to join one, `enable`/`disconnect` for the radio, or `ap` for the charger's own access point |
-| `network` | where the charger is on the network: Ethernet, Wi-Fi and modem addresses, read-only |
+| `connectivity` | where the charger is reachable: Ethernet, Wi-Fi and modem addresses, read-only |
 | `meter-test` | live per-phase readings from an external Modbus TCP/RTU smart meter, for checking its wiring during commissioning (`--json`) |
 | `meter-map [ACTION]` | custom Modbus register map for a meter the charger does not know by name: `show` (the default), `save FILE`, `apply FILE` |
 | `charging-profiles [ACTION]` | OCPP smart-charging profiles: `list` (the default), `show ID`, `clear [ID]`, `install-uk` (the UK Smart Charging default schedule); alias `charging-profile` |
@@ -118,6 +142,7 @@ than typing them thirty times.
 | `calibrate tilt` | store the charger's current position as upright |
 | `reboot` | restart the charger and wait for it to come back (`--no-wait`, `--timeout S`) |
 | `cmd WORDS…` | send a command to the charger's own console (the app's *Command Window*); `--list` prints what the vendor apps are known to send |
+| `diag ACTION` | `send COMMAND [PARAM …] --sequence-id N` submits a firmware-specific diagnostic through `/api/diagtool` with confirmation; `result` reads the current result JSON once |
 | `erase TARGET` | erase `settings` (factory defaults), `personal-data`, or `transactions` |
 | `doctor` | one read-only pass over everything the vendor app warns about, across every panel (`--json`) |
 
@@ -166,6 +191,18 @@ $ alfenctl ui                                      # all of the above, in a brow
 
 Every command takes `--station NAME` (from the settings file below), or a
 charger's Object ID or IP, or `--host <ip>` to skip discovery entirely.
+
+A command that only reads takes several at once — `--station garage,drive`,
+or `--station all` for every station named in `alfen.toml`:
+
+```console
+$ alfenctl status --station all            # one section per charger
+$ alfenctl props --json --station garage,drive   # one document, keyed by station
+```
+
+They are read one after another, each in its own session. Only reads fan
+out: a command that changes a charger takes one station at a time, because
+each of them wants its own preview and its own confirmation.
 
 ## Configuration file
 

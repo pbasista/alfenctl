@@ -19,8 +19,6 @@ $ uv run ruff check .          # lint the Python
 $ uv run ruff format --check . # formatting
 $ uv run ty check              # type-check the package
 $ biome ci                     # lint the browser half
-$ uv run python tools/frontlint.py  # ... and what Biome cannot see
-$ uv run python tools/htmcheck.py   # ... and what only a render would
 $ uv build                     # build the sdist and wheel
 ```
 
@@ -58,13 +56,20 @@ modules -- edit and reload, there is nothing to build. Three things check
 it. [Biome] parses and lints it (`biome.json`); it is a single native
 binary, so it needs no Node (`pacman -S biome`, a [release binary][biome-releases],
 or `npx @biomejs/biome`). It is not a project dependency, and the `pytest`
-case that runs it skips when it is absent. `tools/frontlint.py` checks what
+case that runs it skips when it is absent. The other two are shared with the
+other programs of this shape and live in
+[devicectl-core](https://github.com/pbasista/devicectl-core), which is why
+there is no `tools/` copy of them here: `uv run pytest tests/test_frontlint.py`
+runs one over `src/alfenctl/web/static/` and
+`uv run pytest tests/test_htmcheck.py` the other.
+
+`devicectl.devtools.frontlint` checks what
 Biome cannot see -- the wiring between the modules, which has no build step
 to catch it, and the wiring between the modules and the stylesheet, in both
 directions: a rule nothing wears is dead weight (`C002`), and an element
 wearing a class no stylesheet defines is an invisible bug (`C003`), since
 the browser applies nothing and reports nothing and the element simply
-renders as a plain block. `tools/htmcheck.py` renders every template through the
+renders as a plain block. `devicectl.devtools.htmcheck` renders every template through the
 
 vendored parser itself, in an embedded V8 (``mini-racer`, a dev
 dependency -- one wheel, nothing to compile, and the check skips when it
@@ -90,13 +95,30 @@ docstrings say what and why.
   where to get them, and the containers a charger accepts.
 * `status.py`, `logs.py`, `clock.py`, `controls.py`, ... -- one subject
   each, each used by both front ends.
-* `report.py` -- how a slow operation says what it is doing, so that
-  `upgrade.py` can be driven from a terminal or from a browser.
 * `errors.py` -- `AlfenError`, which every expected failure derives from.
   A command reports one; anything else is a bug and gets a traceback.
 
 The two front ends are `cli/` and `web/`, and they are the only places that
 print, prompt, or return an exit code.
+
+## What lives in devicectl-core
+
+alfenctl and [jkctl](https://github.com/pbasista/jkctl) are the same program
+over different protocols, and what was the same in both has been lifted into
+[devicectl-core](https://github.com/pbasista/devicectl-core): the progress
+protocol a slow operation reports through (`devicectl.report`), the terminal
+bar that draws it (`devicectl.progress`), the shape of a doctor report
+(`devicectl.doctor`), what a subcommand is (`devicectl.cli.command`), the
+event broadcaster (`devicectl.web.events`), the request/reply/routing types
+(`devicectl.web.http`), and the two frontend checks (`devicectl.devtools`).
+
+A checkout builds against the sibling working tree -- see `[tool.uv.sources]`
+in `pyproject.toml` -- so a change there is picked up here without a release.
+
+Something belongs there when **both** programs already need it and neither's
+version is the right one to keep. Anything that knows what a charger is stays
+here: the transport, the retry policy (alfenctl's is authentication-level, a
+401 means log in again; jkctl's is protocol-level), the EDS catalog.
 
 ## The two files we did not write
 

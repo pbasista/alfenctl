@@ -30,7 +30,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from alfenctl.charger import AlfenCharger, LiveProperty
+from devicectl import fields
+from devicectl.fields import FieldSpec
+
+from alfenctl.charger import AlfenCharger
+from alfenctl.connectivity import P_APN
 from alfenctl.eds import INTEGER16, UNSIGNED32, VISIBLE_STRING
 from alfenctl.errors import AlfenError
 
@@ -42,6 +46,29 @@ P_WIRED_URL = (0x2071, 1)  # 8305 sub 1, host and port
 P_WIRED_PATH = (0x2071, 2)  # 8305 sub 2
 P_MOBILE_URL = (0x2078, 1)  # 8312 sub 1
 P_MOBILE_PATH = (0x2078, 2)  # 8312 sub 2
+
+# The GPRS credentials that travel with a backoffice, named here because
+# clearing a preset clears them with it (see :data:`BACKOFFICE_CLEARED`).
+P_APN_USER = (0x2101, 0)  # 8449 gprsAPNuser
+P_APN_PASSWORD = (0x2102, 0)  # 8450 gprsAPNpassword
+
+# The backoffice properties the app empties before it installs a preset, so
+# that a leftover URL or APN from the previous operator cannot survive into
+# the new one (``PanelConnectivity.ClearAllBackOfficeSettings``).  The four
+# network profiles it also clears are left alone: they are a whole panel of
+# their own, and clearing them is not what "apply this preset" was asked.
+BACKOFFICE_CLEARED = (
+    P_WIRED_URL,
+    P_WIRED_PATH,
+    P_MOBILE_URL,
+    P_MOBILE_PATH,
+    P_APN,
+    P_APN_USER,
+    P_APN_PASSWORD,
+)
+
+# CombineBopresetMeterName gives up past this.
+BACKOFFICE_NAME_MAX = 50
 P_HEARTBEAT = (0x2085, 0)  # 8325 commDefaultHeartBeatInterval, the one to write
 P_HEARTBEAT_ACTUAL = (0x2086, 0)  # 8326 commActualHeartBeatInterval, read-only
 P_PING_PONG = (0x208A, 0)  # 8330 commPingPongInterval
@@ -61,64 +88,6 @@ P_SECURITY_PROFILE = (0x2723, 0)  # 10019
 P_PROXY_ENABLED = (0x2117, 0)  # 8471
 P_PROXY_ADDRESS = (0x2115, 0)  # 8469 address and port
 P_PROXY_USER = (0x2116, 0)  # 8470
-
-ALL_KEYS = (
-    P_BACKOFFICE_NAME,
-    P_CONNECT_METHOD,
-    P_PROTOCOL,
-    P_WIRED_URL,
-    P_WIRED_PATH,
-    P_MOBILE_URL,
-    P_MOBILE_PATH,
-    P_HEARTBEAT,
-    P_HEARTBEAT_ACTUAL,
-    P_PING_PONG,
-    P_SEND_TIMEOUT_WIRED,
-    P_SEND_TIMEOUT_MOBILE,
-    P_REPLY_TIMEOUT_WIRED,
-    P_REPLY_TIMEOUT_MOBILE,
-    P_SEND_STATION_STATUS,
-    P_STATUS_MODE,
-    P_INFO_NOTIFICATIONS,
-    P_METER_INTERVAL,
-    P_ALIGNED_INTERVAL,
-    P_TX_ATTEMPTS,
-    P_TX_RETRY_S,
-    P_CPO_NAME,
-    P_SECURITY_PROFILE,
-    P_PROXY_ENABLED,
-    P_PROXY_ADDRESS,
-    P_PROXY_USER,
-)
-
-# What to encode a write as when the charger did not report a type -- which
-# only happens for a property it does not have, where the write fails anyway.
-FALLBACK_TYPES: dict[tuple[int, int], int] = {
-    P_CONNECT_METHOD: INTEGER16,
-    P_PROTOCOL: VISIBLE_STRING,
-    P_WIRED_URL: VISIBLE_STRING,
-    P_WIRED_PATH: VISIBLE_STRING,
-    P_MOBILE_URL: VISIBLE_STRING,
-    P_MOBILE_PATH: VISIBLE_STRING,
-    P_HEARTBEAT: UNSIGNED32,
-    P_PING_PONG: UNSIGNED32,
-    P_SEND_TIMEOUT_WIRED: UNSIGNED32,
-    P_SEND_TIMEOUT_MOBILE: UNSIGNED32,
-    P_REPLY_TIMEOUT_WIRED: UNSIGNED32,
-    P_REPLY_TIMEOUT_MOBILE: UNSIGNED32,
-    P_SEND_STATION_STATUS: INTEGER16,
-    P_STATUS_MODE: INTEGER16,
-    P_INFO_NOTIFICATIONS: INTEGER16,
-    P_METER_INTERVAL: UNSIGNED32,
-    P_ALIGNED_INTERVAL: UNSIGNED32,
-    P_TX_ATTEMPTS: UNSIGNED32,
-    P_TX_RETRY_S: UNSIGNED32,
-    P_CPO_NAME: VISIBLE_STRING,
-    P_SECURITY_PROFILE: INTEGER16,
-    P_PROXY_ENABLED: INTEGER16,
-    P_PROXY_ADDRESS: VISIBLE_STRING,
-    P_PROXY_USER: VISIBLE_STRING,
-}
 
 # commConnectMethod.  A charger may answer 99 for "automatic", which the app
 # folds onto 3 before it shows the dropdown.
@@ -142,7 +111,336 @@ STATUS_MODES = {0: "immediate", 1: "immediate with a timestamp", 2: "queued"}
 MAX_INTERVAL_S = 86400
 
 
-class OcppError(AlfenError, ValueError):
+def _url_row(value: Any, state: Ocpp) -> str | None:
+    """Render a back-office URL with its path, which has no row of its own."""
+    if not value:
+        return None
+    path = state.wired_path if value == state.wired_url else state.mobile_path
+    return f"{value}/{path}" if path else str(value)
+
+
+def _heartbeat_row(value: Any, state: Ocpp) -> str | None:
+    """Render the heartbeat asked for, and the one the backoffice settled on."""
+    if value is None:
+        return None
+    actual = state.heartbeat_actual_s
+    note = "" if actual in (None, value) else f" (actual {actual} s)"
+    return f"{value} s{note}"
+
+
+def _pair_row(value: Any, _state: Ocpp) -> str | None:
+    """Render a wired/mobile pair of timeouts as the one row the app shows."""
+    wired, mobile = value
+    if wired is None and mobile is None:
+        return None
+    return f"{wired} s wired, {mobile} s mobile"
+
+
+def _interval(**over: Any) -> dict[str, Any]:
+    """Return the keywords every one of the five interval fields shares."""
+    return {
+        "kind": fields.INTEGER,
+        "wire": UNSIGNED32,
+        "unit": "s",
+        "minimum": 0,
+        "maximum": MAX_INTERVAL_S,
+        "metavar": "S",
+        **over,
+    }
+
+
+# --- the settings ------------------------------------------------------------------------
+# In the order the terminal prints them, and the one place any audience is
+# told about a field.  :attr:`FieldSpec.wire` here is only the *fallback*: most
+# of these registers are absent from the bundled EDS, so :func:`apply` encodes
+# each write with the type the charger itself reported and falls back to this
+# when it reported none -- which only happens for a property the station does
+# not have, where the write fails anyway.
+#
+# The three composite rows keep their own renderers: a URL prints with the path
+# beside it, the heartbeat prints the negotiated value next to the configured
+# one, and the two timeouts are a wired/mobile pair the app shows as one line.
+FIELDS: tuple[FieldSpec, ...] = (
+    FieldSpec(
+        name="backoffice_name",
+        kind=fields.TEXT,
+        address=P_BACKOFFICE_NAME,
+        label="Back office",
+        json="backofficeName",
+        access=fields.READ_ONLY,
+    ),
+    FieldSpec(
+        name="connect_method",
+        kind=fields.ENUM,
+        address=P_CONNECT_METHOD,
+        wire=INTEGER16,
+        label="Connect method",
+        json="connectMethod",
+        flag="--connect-method",
+        options=CONNECT_METHODS,
+        what="the connect method",
+        help="how to dial out",
+    ),
+    FieldSpec(
+        name="protocol",
+        kind=fields.TEXT,
+        address=P_PROTOCOL,
+        wire=VISIBLE_STRING,
+        label="OCPP version",
+        json="protocol",
+        flag="--protocol",
+        options=PROTOCOLS,
+        what="the OCPP version",
+        help="the OCPP version",
+    ),
+    FieldSpec(
+        name="wired_url",
+        kind=fields.TEXT,
+        address=P_WIRED_URL,
+        wire=VISIBLE_STRING,
+        label="Wired URL",
+        json="wiredUrl",
+        flag="--wired-url",
+        metavar="URL",
+        what="the wired back-office URL",
+        help="the CSMS host and port, wired",
+        render=_url_row,
+    ),
+    FieldSpec(
+        name="wired_path",
+        kind=fields.TEXT,
+        address=P_WIRED_PATH,
+        wire=VISIBLE_STRING,
+        json="wiredPath",
+        flag="--wired-path",
+        metavar="PATH",
+        what="the wired back-office path",
+        help="its path, wired",
+    ),
+    FieldSpec(
+        name="mobile_url",
+        kind=fields.TEXT,
+        address=P_MOBILE_URL,
+        wire=VISIBLE_STRING,
+        label="Mobile URL",
+        json="mobileUrl",
+        flag="--mobile-url",
+        metavar="URL",
+        what="the mobile back-office URL",
+        help="the CSMS host and port, mobile",
+        render=_url_row,
+    ),
+    FieldSpec(
+        name="mobile_path",
+        kind=fields.TEXT,
+        address=P_MOBILE_PATH,
+        wire=VISIBLE_STRING,
+        json="mobilePath",
+        flag="--mobile-path",
+        metavar="PATH",
+        what="the mobile back-office path",
+        help="its path, mobile",
+    ),
+    FieldSpec(
+        name="security_profile",
+        kind=fields.ENUM,
+        address=P_SECURITY_PROFILE,
+        wire=INTEGER16,
+        label="Security profile",
+        json="securityProfile",
+        flag="--security-profile",
+        options=SECURITY_PROFILES,
+        what="the security profile",
+        help="OCPP security",
+    ),
+    FieldSpec(
+        name="cpo_name",
+        kind=fields.TEXT,
+        address=P_CPO_NAME,
+        wire=VISIBLE_STRING,
+        label="CPO name",
+        json="cpoName",
+        flag="--cpo-name",
+        metavar="NAME",
+        what="the CPO name",
+        help="the operator name on the certificate",
+    ),
+    FieldSpec(
+        **_interval(
+            name="heartbeat_s",
+            address=P_HEARTBEAT,
+            label="Heartbeat",
+            json="heartbeatS",
+            flag="--heartbeat",
+            what="the heartbeat interval",
+            help="the heartbeat interval to ask for (0x2085_0; the negotiated "
+            "one at 0x2086_0 is read-only)",
+            render=_heartbeat_row,
+        )
+    ),
+    FieldSpec(
+        name="heartbeat_actual_s",
+        kind=fields.INTEGER,
+        address=P_HEARTBEAT_ACTUAL,
+        json="heartbeatActualS",
+        unit="s",
+        access=fields.READ_ONLY,
+    ),
+    FieldSpec(
+        **_interval(
+            name="ping_pong_s",
+            address=P_PING_PONG,
+            label="Ping/pong",
+            json="pingPongS",
+            flag="--ping-pong",
+            what="the ping/pong interval",
+            help="websocket ping interval",
+        )
+    ),
+    FieldSpec(
+        **_interval(
+            name="meter_interval_s",
+            address=P_METER_INTERVAL,
+            label="Meter interval",
+            json="meterIntervalS",
+            flag="--meter-interval",
+            what="the meter interval",
+            help="how often to send meter values",
+        )
+    ),
+    FieldSpec(
+        **_interval(
+            name="aligned_interval_s",
+            address=P_ALIGNED_INTERVAL,
+            label="Aligned interval",
+            json="alignedIntervalS",
+            flag="--aligned-interval",
+            what="the clock-aligned interval",
+            help="the clock-aligned interval",
+        )
+    ),
+    FieldSpec(
+        **_interval(
+            name="tx_retry_s",
+            address=P_TX_RETRY_S,
+            label="Retry interval",
+            json="txRetryS",
+            flag="--tx-retry",
+            what="the retry interval",
+            help="the retry interval",
+        )
+    ),
+    FieldSpec(
+        name="send_timeout_s",
+        label="Send timeout",
+        json="sendTimeoutS",
+        access=fields.READ_ONLY,
+        render=_pair_row,
+    ),
+    FieldSpec(
+        name="reply_timeout_s",
+        label="Reply timeout",
+        json="replyTimeoutS",
+        access=fields.READ_ONLY,
+        render=_pair_row,
+    ),
+    FieldSpec(
+        name="tx_attempts",
+        kind=fields.INTEGER,
+        address=P_TX_ATTEMPTS,
+        wire=UNSIGNED32,
+        label="Message attempts",
+        json="txAttempts",
+        flag="--tx-attempts",
+        minimum=0,
+        metavar="N",
+        what="the message attempts",
+        help="transaction message attempts",
+    ),
+    FieldSpec(
+        name="status_mode",
+        kind=fields.ENUM,
+        address=P_STATUS_MODE,
+        wire=INTEGER16,
+        label="Status notification",
+        json="statusMode",
+        flag="--status-mode",
+        options=STATUS_MODES,
+        what="the status notification mode",
+        help="status notifications",
+    ),
+    FieldSpec(
+        name="send_station_status",
+        kind=fields.FLAG,
+        address=P_SEND_STATION_STATUS,
+        wire=INTEGER16,
+        label="Send station status",
+        json="sendStationStatus",
+        flag="--send-station-status",
+        help="send the station's own status",
+    ),
+    FieldSpec(
+        name="info_notifications",
+        kind=fields.FLAG,
+        address=P_INFO_NOTIFICATIONS,
+        wire=INTEGER16,
+        label="Informational notices",
+        json="infoNotifications",
+        flag="--info-notifications",
+        help="send informational notifications",
+    ),
+    FieldSpec(
+        name="proxy_enabled",
+        kind=fields.FLAG,
+        address=P_PROXY_ENABLED,
+        wire=INTEGER16,
+        label="Proxy",
+        json="proxyEnabled",
+        flag="--proxy",
+        help="use an HTTP proxy",
+    ),
+    FieldSpec(
+        name="proxy_address",
+        kind=fields.TEXT,
+        address=P_PROXY_ADDRESS,
+        wire=VISIBLE_STRING,
+        label="  address",
+        json="proxyAddress",
+        flag="--proxy-address",
+        metavar="HOST:PORT",
+        what="the proxy address",
+        help="the proxy's address",
+    ),
+    FieldSpec(
+        name="proxy_user",
+        kind=fields.TEXT,
+        address=P_PROXY_USER,
+        wire=VISIBLE_STRING,
+        label="  user",
+        json="proxyUser",
+        flag="--proxy-user",
+        metavar="NAME",
+        what="the proxy user",
+        help="the proxy user name",
+    ),
+)
+
+# The two timeouts are a wired/mobile pair each, so they are four registers
+# behind two fields and are asked for by name rather than through the table.
+TIMEOUT_KEYS = (
+    P_SEND_TIMEOUT_WIRED,
+    P_SEND_TIMEOUT_MOBILE,
+    P_REPLY_TIMEOUT_WIRED,
+    P_REPLY_TIMEOUT_MOBILE,
+)
+
+ALL_KEYS = (
+    *(spec.address for spec in FIELDS if spec.address is not None),
+    *TIMEOUT_KEYS,
+)
+
+
+class OcppError(AlfenError, fields.FieldError):
     """An OCPP setting the charger could not sensibly be given."""
 
 
@@ -205,249 +503,81 @@ class Ocpp:
 
     def rows(self) -> list[tuple[str, str]]:
         """Return the label/value pairs worth printing, skipping what is absent."""
-        out: list[tuple[str, str]] = []
-        if self.backoffice_name:
-            out.append(("Back office", self.backoffice_name))
-        if self.connect_method is not None:
-            out.append(("Connect method", _label(CONNECT_METHODS, self.connect_method)))
-        if self.protocol:
-            out.append(("OCPP version", self.protocol))
-        for label, url, path in (
-            ("Wired URL", self.wired_url, self.wired_path),
-            ("Mobile URL", self.mobile_url, self.mobile_path),
-        ):
-            if url:
-                out.append((label, f"{url}/{path}" if path else url))
-        if self.security_profile is not None:
-            out.append(
-                ("Security profile", _label(SECURITY_PROFILES, self.security_profile))
-            )
-        if self.cpo_name:
-            out.append(("CPO name", self.cpo_name))
-        if self.heartbeat_s is not None:
-            actual = self.heartbeat_actual_s
-            note = "" if actual in (None, self.heartbeat_s) else f" (actual {actual} s)"
-            out.append(("Heartbeat", f"{self.heartbeat_s} s{note}"))
-        for label, seconds in (
-            ("Ping/pong", self.ping_pong_s),
-            ("Meter interval", self.meter_interval_s),
-            ("Aligned interval", self.aligned_interval_s),
-            ("Retry interval", self.tx_retry_s),
-        ):
-            if seconds is not None:
-                out.append((label, f"{seconds} s"))
-        for label, pair in (
-            ("Send timeout", self.send_timeout_s),
-            ("Reply timeout", self.reply_timeout_s),
-        ):
-            wired, mobile = pair
-            if wired is not None or mobile is not None:
-                out.append((label, f"{wired} s wired, {mobile} s mobile"))
-        if self.tx_attempts is not None:
-            out.append(("Message attempts", str(self.tx_attempts)))
-        if self.status_mode is not None:
-            out.append(("Status notification", _label(STATUS_MODES, self.status_mode)))
-        for label, flag in (
-            ("Send station status", self.send_station_status),
-            ("Informational notices", self.info_notifications),
-        ):
-            if flag is not None:
-                out.append((label, "enabled" if flag else "disabled"))
-        if self.proxy_enabled is not None:
-            out.append(("Proxy", "enabled" if self.proxy_enabled else "disabled"))
-            if self.proxy_address:
-                out.append(("  address", self.proxy_address))
-            if self.proxy_user:
-                out.append(("  user", self.proxy_user))
-        return out
-
-
-def _label(table: dict[int, str], code: int) -> str:
-    """Look up a code, keeping the raw number when the table lacks it."""
-    return table.get(code, f"unknown ({code})")
-
-
-def _int(live: dict[tuple[int, int], LiveProperty], key: tuple[int, int]) -> int | None:
-    """Read a property as an integer, or None when absent or not numeric."""
-    prop = live.get(key)
-    if prop is None or prop.value is None:
-        return None
-    try:
-        return int(float(prop.value))
-    except (TypeError, ValueError):
-        return None
-
-
-def _flag(
-    live: dict[tuple[int, int], LiveProperty], key: tuple[int, int]
-) -> bool | None:
-    """Read a property as a boolean, or None when the charger did not answer."""
-    value = _int(live, key)
-    return None if value is None else bool(value)
-
-
-def _text(
-    live: dict[tuple[int, int], LiveProperty], key: tuple[int, int]
-) -> str | None:
-    """Read a property as a non-empty string, or None."""
-    prop = live.get(key)
-    if prop is None or prop.value in (None, ""):
-        return None
-    return str(prop.value)
+        return fields.rows(FIELDS, self)
 
 
 def read(charger: AlfenCharger) -> Ocpp:
     """Read every back-office register in one ``ids=`` query."""
     live = {lp.key: lp for lp in charger.fetch_properties_by_ids(list(ALL_KEYS))}
-    method = _int(live, P_CONNECT_METHOD)
-    if method == CONNECT_AUTOMATIC_RAW:
-        method = 3
-    return Ocpp(
-        backoffice_name=_text(live, P_BACKOFFICE_NAME),
-        connect_method=method,
-        protocol=_text(live, P_PROTOCOL),
-        wired_url=_text(live, P_WIRED_URL),
-        wired_path=_text(live, P_WIRED_PATH),
-        mobile_url=_text(live, P_MOBILE_URL),
-        mobile_path=_text(live, P_MOBILE_PATH),
-        heartbeat_s=_int(live, P_HEARTBEAT),
-        heartbeat_actual_s=_int(live, P_HEARTBEAT_ACTUAL),
-        ping_pong_s=_int(live, P_PING_PONG),
-        send_timeout_s=(
-            _int(live, P_SEND_TIMEOUT_WIRED),
-            _int(live, P_SEND_TIMEOUT_MOBILE),
-        ),
-        reply_timeout_s=(
-            _int(live, P_REPLY_TIMEOUT_WIRED),
-            _int(live, P_REPLY_TIMEOUT_MOBILE),
-        ),
-        send_station_status=_flag(live, P_SEND_STATION_STATUS),
-        status_mode=_int(live, P_STATUS_MODE),
-        info_notifications=_flag(live, P_INFO_NOTIFICATIONS),
-        meter_interval_s=_int(live, P_METER_INTERVAL),
-        aligned_interval_s=_int(live, P_ALIGNED_INTERVAL),
-        tx_attempts=_int(live, P_TX_ATTEMPTS),
-        tx_retry_s=_int(live, P_TX_RETRY_S),
-        cpo_name=_text(live, P_CPO_NAME),
-        security_profile=_int(live, P_SECURITY_PROFILE),
-        proxy_enabled=_flag(live, P_PROXY_ENABLED),
-        proxy_address=_text(live, P_PROXY_ADDRESS),
-        proxy_user=_text(live, P_PROXY_USER),
-        types={
-            key: prop.data_type
-            for key, prop in live.items()
-            if prop.data_type is not None
-        },
+
+    def answer(key: tuple[int, int]) -> Any:
+        prop = live.get(key)
+        return None if prop is None else prop.value
+
+    def seconds(key: tuple[int, int]) -> int | None:
+        value = answer(key)
+        try:
+            return None if value is None or value == "" else int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+    state = Ocpp(**fields.harvest(FIELDS, answer))
+    # The app folds the charger's 99 onto its own "automatic" before it draws
+    # the dropdown, and so does this, so one meaning has one number here.
+    if state.connect_method == CONNECT_AUTOMATIC_RAW:
+        state.connect_method = 3
+    state.send_timeout_s = (
+        seconds(P_SEND_TIMEOUT_WIRED),
+        seconds(P_SEND_TIMEOUT_MOBILE),
     )
-
-
-def _interval(seconds: int, what: str) -> int:
-    """Return ``seconds`` if it is an interval the charger will honour."""
-    if not 0 <= seconds <= MAX_INTERVAL_S:
-        raise OcppError(f"{what} must be between 0 and {MAX_INTERVAL_S} s")
-    return int(seconds)
+    state.reply_timeout_s = (
+        seconds(P_REPLY_TIMEOUT_WIRED),
+        seconds(P_REPLY_TIMEOUT_MOBILE),
+    )
+    state.types = {
+        key: prop.data_type for key, prop in live.items() if prop.data_type is not None
+    }
+    return state
 
 
 def apply(
     charger: AlfenCharger,
+    settings: dict[str, Any] | None = None,
     *,
-    connect_method: int | None = None,
-    protocol: str | None = None,
-    wired_url: str | None = None,
-    wired_path: str | None = None,
-    mobile_url: str | None = None,
-    mobile_path: str | None = None,
-    heartbeat_s: int | None = None,
-    ping_pong_s: int | None = None,
-    meter_interval_s: int | None = None,
-    aligned_interval_s: int | None = None,
-    send_station_status: bool | None = None,
-    status_mode: int | None = None,
-    info_notifications: bool | None = None,
-    tx_attempts: int | None = None,
-    tx_retry_s: int | None = None,
-    cpo_name: str | None = None,
-    security_profile: int | None = None,
-    proxy_enabled: bool | None = None,
-    proxy_address: str | None = None,
-    proxy_user: str | None = None,
     state: Ocpp | None = None,
+    **named: Any,
 ) -> Ocpp:
     """Write the settings that were named, and return the charger's new state.
 
     Most of these have no EDS entry, so each write is encoded with the type
-    the charger itself reported for that property; ``state`` is the reading
-    that carries those types, and is taken fresh when it was not supplied.
+    the charger itself reported for that property, falling back to the field
+    table's own; ``state`` is the reading that carries those types, and is
+    taken fresh when it was not supplied.
     """
+    given = {**(settings or {}), **named}
+    try:
+        checked = fields.values(FIELDS, given)
+    except fields.FieldError as exc:
+        raise OcppError(str(exc)) from None
+    if not checked:
+        return read(charger)
     if state is None:
         state = read(charger)
-    plain: dict[tuple[int, int], Any] = {}
-    if connect_method is not None:
-        if connect_method not in CONNECT_METHODS:
-            raise OcppError(
-                "the connect method is "
-                + ", ".join(f"{v} ({n})" for v, n in sorted(CONNECT_METHODS.items()))
-            )
-        plain[P_CONNECT_METHOD] = connect_method
-    if protocol is not None:
-        if protocol not in PROTOCOLS:
-            raise OcppError(f"the OCPP version is one of {', '.join(PROTOCOLS)}")
-        plain[P_PROTOCOL] = protocol
-    for value, key in (
-        (wired_url, P_WIRED_URL),
-        (wired_path, P_WIRED_PATH),
-        (mobile_url, P_MOBILE_URL),
-        (mobile_path, P_MOBILE_PATH),
-        (cpo_name, P_CPO_NAME),
-        (proxy_address, P_PROXY_ADDRESS),
-        (proxy_user, P_PROXY_USER),
-    ):
-        if value is not None:
-            plain[key] = value
-    for seconds, key, what in (
-        (heartbeat_s, P_HEARTBEAT, "the heartbeat interval"),
-        (ping_pong_s, P_PING_PONG, "the ping/pong interval"),
-        (meter_interval_s, P_METER_INTERVAL, "the meter interval"),
-        (aligned_interval_s, P_ALIGNED_INTERVAL, "the clock-aligned interval"),
-        (tx_retry_s, P_TX_RETRY_S, "the retry interval"),
-    ):
-        if seconds is not None:
-            plain[key] = _interval(seconds, what)
-    for flag, key in (
-        (send_station_status, P_SEND_STATION_STATUS),
-        (info_notifications, P_INFO_NOTIFICATIONS),
-        (proxy_enabled, P_PROXY_ENABLED),
-    ):
-        if flag is not None:
-            plain[key] = int(flag)
-    if status_mode is not None:
-        if status_mode not in STATUS_MODES:
-            raise OcppError(f"unknown status notification mode {status_mode}")
-        plain[P_STATUS_MODE] = status_mode
-    if security_profile is not None:
-        if security_profile not in SECURITY_PROFILES:
-            raise OcppError(
-                "the security profile is "
-                + ", ".join(f"{v} ({n})" for v, n in sorted(SECURITY_PROFILES.items()))
-            )
-        plain[P_SECURITY_PROFILE] = security_profile
-    if tx_attempts is not None:
-        if tx_attempts < 0:
-            raise OcppError("the message attempts cannot be negative")
-        plain[P_TX_ATTEMPTS] = tx_attempts
-    if plain:
-        charger.write_properties(
-            {
-                key: (value, state.types.get(key) or FALLBACK_TYPES.get(key))
-                for key, value in plain.items()
-            }
+    reported = state.types
+    charger.write_properties(
+        fields.writes(
+            FIELDS,
+            checked,
+            wire=lambda spec: reported.get(spec.address) or spec.wire,
         )
+    )
     return read(charger)
 
 
 __all__ = [
     "ALL_KEYS",
     "CONNECT_METHODS",
+    "FIELDS",
     "Ocpp",
     "OcppError",
     "PROTOCOLS",

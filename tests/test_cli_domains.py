@@ -118,7 +118,7 @@ def test_loadbalancing_set_safe_current_sends_one_batch(fake_charger) -> None:
     assert fake_charger.writes[0][(0x2068, 0)][0] == 10.0
 
 
-def test_network_show_lists_what_it_can_reach(fake_charger, capsys) -> None:
+def test_connectivity_lists_what_it_can_reach(fake_charger, capsys) -> None:
     _props(
         fake_charger,
         [
@@ -127,5 +127,5 @@ def test_network_show_lists_what_it_can_reach(fake_charger, capsys) -> None:
             {"id": "3284_0", "access": 2, "type": 5, "value": 1},
         ],
     )
-    assert cli.main(["network", "--host", "1.2.3.4"]) == 0
+    assert cli.main(["connectivity", "--host", "1.2.3.4"]) == 0
     assert "home-wifi" in capsys.readouterr().out

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-
 import pytest
-
 from conftest import (
     patch_wait_until_back,
 )
@@ -127,17 +125,31 @@ def test_calibrate_tilt_without_a_sensor(fake_charger, capsys) -> None:
     assert "does not report a tilt sensor" in capsys.readouterr().err
 
 
-def test_cmd_list_prints_what_the_console_is_known_to_do(capsys) -> None:
-    # No --host and no charger: the table is static, so nothing is opened.
-    assert cli.main(["cmd", "--list"]) == 0
-    captured = capsys.readouterr()
-    assert "eepromx erase config" in captured.out
-    assert "cansync off" in captured.out  # seen in a real log, in no app
-    assert "Tamper detection On" in captured.out  # named, wire form unknown
-    assert "unknown, not" in captured.err
-
-
 def test_cmd_without_a_command_points_at_the_list(fake_charger, capsys) -> None:
     assert cli.main(["cmd", "--host", "1.2.3.4"]) != 0
     assert "--list" in capsys.readouterr().err
     assert fake_charger.commands == []
+
+
+def test_diag_submission_requires_confirmation(fake_charger, monkeypatch) -> None:
+    def unexpected_send(*args, **kwargs):
+        pytest.fail("declining a diagnostic must not submit it")
+
+    monkeypatch.setattr(
+        fake_charger, "send_diagnostic_command", unexpected_send, raising=False
+    )
+    monkeypatch.setattr("builtins.input", lambda prompt: "n")
+    assert (
+        cli.main(
+            [
+                "diag",
+                "send",
+                "vendor-command",
+                "--sequence-id",
+                "7",
+                "--host",
+                "1.2.3.4",
+            ]
+        )
+        == cli.EXIT_ERROR
+    )

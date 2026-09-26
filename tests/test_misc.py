@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from devicectl.progress import PROGRESS_BAR_WIDTH, bar, fmt_duration
+
 from alfenctl.discovery import Station
-from alfenctl.progress import PROGRESS_BAR_WIDTH, bar, fmt_duration
 
 
 def test_object_id_from_hostname() -> None:

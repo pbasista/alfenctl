@@ -1,0 +1,49 @@
+[
+  {
+    "dest": "ssid",
+    "flags": [],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": "SSID",
+    "choices": null,
+    "default": null,
+    "required": true,
+    "help": "the network to join"
+  },
+  {
+    "flags": [
+      "--psk"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": null,
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "its passphrase (prompted for when not given)"
+  },
+  {
+    "flags": [
+      "--open"
+    ],
+    "action": "_StoreTrueAction",
+    "type": null,
+    "metavar": null,
+    "choices": null,
+    "default": false,
+    "required": false,
+    "help": "the network has no password at all"
+  },
+  {
+    "flags": [
+      "--security"
+    ],
+    "action": "_StoreAction",
+    "type": "int",
+    "metavar": "N",
+    "choices": null,
+    "default": null,
+    "required": false,
+    "help": "the security type, when the default (WPA2-AES) is wrong: 0 (open), 2097154 (WPA PSK (TKIP)), 2097156 (WPA PSK (AES)), 2097158 (WPA PSK (AES & TKIP)), 4194306 (WPA2 PSK (TKIP)), 4194308 (WPA2 PSK (AES)), 4194310 (WPA2 PSK (AES & TKIP)), 6291460 (WPA2/WPA PSK (AES)), 6291462 (WPA2/WPA PSK (AES & TKIP)), 16777220 (WPA3 PSK (AES)), 20971524 (WPA3/WPA2 PSK (AES))"
+  }
+]

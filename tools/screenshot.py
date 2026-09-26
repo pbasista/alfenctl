@@ -12,8 +12,8 @@ Three things are arranged before the shot, and only these three:
 * The clock reads *now*.  The fixture's is frozen in August 2026, and the
   dashboard would rightly badge it as days behind this computer -- a true
   statement about the fixture that says nothing about the tool.
-* The meter wanders a little, because the recorder plots what it is given
-  and a constant draws a flat line.
+* The meter wanders a little, and so does the case temperature, because
+  the recorder plots what it is given and a constant draws a flat line.
 * The power chart is handed a session that already happened.  The chart is
   the page's own memory -- it plots what this tab has watched, and it never
   draws a window narrower than three minutes (MIN_SPAN_S in
@@ -22,10 +22,10 @@ Three things are arranged before the shot, and only these three:
   Instead `_profile` writes a plausible half-hour into the same
   sessionStorage the chart keeps its samples in -- a car that starts at
   full current, gets turned down to the 6 A minimum partway through, and
-  is let back up -- and the page draws it on the next load.  The trace in
-  the README is therefore a scripted demonstration of the chart, not a
-  recording of anything; live samples from the fake continue it at the
-  right-hand edge.
+  is let back up, with the case temperature lagging behind it -- and the
+  page draws both on the next load.  The trace in the README is therefore a
+  scripted demonstration of the chart, not a recording of anything; live
+  samples from the fake continue it at the right-hand edge.
 
 Everything else on the page is the fixture's, unedited.
 
@@ -39,15 +39,34 @@ browser and is wanted about once a release:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import random
 import sys
 import threading
 import time
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUT = ROOT / "docs" / "images" / "dashboard.png"
+
+# Every tab, in the order `TABS` in `web/static/js/app.js` lists them.  The
+# route is the tab's own id: alfenctl has one device per server, so there is
+# nothing to name in front of it.  Shared with `tools/rendercheck.py`.
+TABS = {
+    name: name
+    for name in (
+        "fleet",
+        "dashboard",
+        "charging",
+        "sessions",
+        "logs",
+        "access",
+        "connectivity",
+        "backoffice",
+        "properties",
+        "actions",
+    )
+}
 
 # The header button that turns live polling on; see `LiveToggle` in
 # `web/static/js/ui.js`.  Without it the meter card says so, and the
@@ -64,6 +83,20 @@ CARDS = 6
 METER_KEY = "2221_16"
 WATTS_LOW = 3300.0
 WATTS_HIGH = 3600.0
+
+# The inside temperature (0x2201 sub 0), which rides on the same chart in
+# its own colour.  The fake holds it at one value, which draws the flat line
+# a constant deserves; these are the ends of the range a station that has
+# been charging for twenty minutes actually sits in, and `_warmth` puts the
+# seeded session's temperature between them.
+TEMP_KEY = "2201_0"
+TEMP_COLD_C = 21.5
+TEMP_HOT_C = 31.0
+
+# How fast the case follows the power, per sample.  A charger does not heat
+# and cool with the current -- it lags it by minutes, which is the whole
+# reason the two lines are worth having next to each other.
+TEMP_FOLLOW = 0.02
 
 # How often the worker reads the charger.  `webfake.make_worker` polls
 # twenty times a second, which suits a test that wants an answer now; the
@@ -99,18 +132,21 @@ PROFILE = (
 )
 
 
-def _serve():
+def _serve(port: int = 0):
     """Start a UIServer over the fake charger.
 
     Returns the server, the worker behind it, and the `webfake` module, whose
-    property table the caller goes on editing while the page records.
+    property table the caller goes on editing while the page records.  A
+    ``port`` of 0 lets the kernel choose; `server.server_port` says which.
     """
     sys.path.insert(0, str(ROOT / "tests"))
     sys.path.insert(0, str(ROOT / "src"))
 
-    from alfenctl.web import api
-    from alfenctl.web.server import UIServer
     import webfake
+    from devicectl.web.server import Settings, UIServer
+
+    from alfenctl.web import api
+    from alfenctl.web.server import BRANDING
 
     _use_this_computers_clock(webfake)
 
@@ -135,9 +171,12 @@ def _serve():
     worker.set_poll_fn(api.make_poll(context))
 
     server = UIServer(
-        ("127.0.0.1", 0),
+        ("127.0.0.1", port),
+        branding=BRANDING,
+        routes=api.ROUTES,
         context=context,
         events=worker.events,
+        settings=Settings(),
         token="",
         allowed_hosts=frozenset({"localhost"}),
     )
@@ -145,6 +184,23 @@ def _serve():
         target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
     ).start()
     return server, worker, webfake
+
+
+@contextlib.contextmanager
+def serve_fake(port: int):
+    """Serve the fake charger's UI on ``port`` for as long as the block lasts.
+
+    Shared with ``tools/rendercheck.py``: both tools want the same page over
+    the same fake charger, and only one of them should know how to start it.
+    """
+    server, worker, _ = _serve(port)
+    try:
+        yield server
+    finally:
+        server.stopping.set()
+        server.events.shutdown()
+        server.shutdown()
+        worker.stop()
 
 
 def _use_this_computers_clock(webfake) -> None:
@@ -168,11 +224,22 @@ def _rewrite(webfake, key: str, value) -> None:
 
 
 def _wander(webfake, stop: threading.Event, rng: random.Random) -> None:
-    """Nudge the meter between polls, so the chart records a curve."""
+    """Nudge the meter and the case between polls, so the chart records curves.
+
+    The first write happens before the first wait, because the page starts
+    recording the moment live updates go on: a sample taken while the
+    fixture still held its own 24.5 degrees lands *after* the seeded session
+    and draws a cliff on the right-hand edge of the chart.
+    """
     watts = (WATTS_LOW + WATTS_HIGH) / 2
+    celsius = TEMP_HOT_C
+    _rewrite(webfake, METER_KEY, round(watts, 1))
+    _rewrite(webfake, TEMP_KEY, round(celsius, 1))
     while not stop.wait(1.0):
         watts = min(WATTS_HIGH, max(WATTS_LOW, watts + rng.uniform(-40, 40)))
+        celsius += rng.uniform(-0.05, 0.05)
         _rewrite(webfake, METER_KEY, round(watts, 1))
+        _rewrite(webfake, TEMP_KEY, round(celsius, 1))
 
 
 def _profile(count: int, rng: random.Random) -> list[float]:
@@ -194,6 +261,24 @@ def _profile(count: int, rng: random.Random) -> list[float]:
     return readings
 
 
+def _warmth(watts: list[float], rng: random.Random) -> list[float]:
+    """Work out the case temperature that goes with a session's watts.
+
+    A first-order lag on the power, which is what a metal box in a garage
+    does: it keeps climbing after the current is turned down and it is still
+    warm when the car finishes.  Without the lag the second line would be
+    the first line in another colour, which is a second line worth nothing.
+    """
+    top = max(watts) or 1.0
+    celsius = TEMP_COLD_C
+    out = []
+    for value in watts:
+        aim = TEMP_COLD_C + (TEMP_HOT_C - TEMP_COLD_C) * (value / top)
+        celsius += (aim - celsius) * TEMP_FOLLOW
+        out.append(round(celsius + rng.uniform(-0.05, 0.05), 1))
+    return out
+
+
 def _seed_history(page, minutes: int, rng: random.Random) -> bool:
     """Write a past session into the chart's own store.
 
@@ -203,8 +288,9 @@ def _seed_history(page, minutes: int, rng: random.Random) -> bool:
     on its next load, which the caller is responsible for.
     """
     count = minutes * 60 // POLL_SECONDS
+    watts = _profile(count, rng)
     ok = page.evaluate(
-        """({ prefix, watts, step }) => {
+        """({ prefix, watts, celsius, step }) => {
             const key = Object.keys(sessionStorage).find((k) => k.startsWith(prefix));
             if (!key) return false;
             const held = JSON.parse(sessionStorage.getItem(key) || '[]');
@@ -212,11 +298,17 @@ def _seed_history(page, minutes: int, rng: random.Random) -> bool:
             const seeded = watts.map((w, i) => ({
               t: first - (watts.length - i) * step,
               w,
+              c: celsius[i],
             }));
             sessionStorage.setItem(key, JSON.stringify(seeded.concat(held)));
             return true;
         }""",
-        {"prefix": HISTORY_KEY, "watts": _profile(count, rng), "step": POLL_SECONDS},
+        {
+            "prefix": HISTORY_KEY,
+            "watts": watts,
+            "celsius": _warmth(watts, rng),
+            "step": POLL_SECONDS,
+        },
     )
     return bool(ok)
 
@@ -243,7 +335,9 @@ def main() -> int:
     parser.add_argument("-o", "--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--theme", choices=("dark", "light"), default="dark")
     parser.add_argument("--width", type=int, default=1280)
-    parser.add_argument("--tab", default="dashboard", help="which tab to open")
+    parser.add_argument(
+        "--tab", default="dashboard", choices=list(TABS), help="which tab to open"
+    )
     parser.add_argument(
         "--full", action="store_true", help="the whole page, not just the top rows"
     )
@@ -291,7 +385,9 @@ def main() -> int:
                 color_scheme=args.theme,
                 reduced_motion="reduce",
             ).new_page()
-            page.goto(f"{base}/{args.tab}", wait_until="networkidle")
+            # By hash: the tab strip is hash-routed (`useTabs` in the shared
+            # shell.js), and a path just serves index.html at the first tab.
+            page.goto(f"{base}/#{args.tab}", wait_until="networkidle")
             page.wait_for_selector("nav.tabs")
             page.click(LIVE_BUTTON)
             # A moment first, so the chart's store exists to be seeded.

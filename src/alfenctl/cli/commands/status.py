@@ -12,13 +12,12 @@ import sys
 from datetime import datetime
 from typing import Any
 
+from devicectl.cli.command import Command
 
-from alfenctl import meter_test
-from alfenctl import status as status_mod
+from alfenctl import meter_test, status as status_mod
 from alfenctl.charger import AlfenCharger
-from alfenctl.cli.command import Command
 from alfenctl.cli.exits import EXIT_ERROR, EXIT_OK
-from alfenctl.cli.output import CLOCK_FORMAT
+from alfenctl.cli.output import CLOCK_FORMAT, print_json
 
 # `status --watch` without a number: the app's own monitoring panel polls
 # once a second, but a whole category walk per reading is heavier than that.
@@ -57,7 +56,7 @@ def _print_status(charger: AlfenCharger, args: argparse.Namespace) -> int:
     info = charger.basic_info()
     snapshot = status_mod.collect(charger, info.sockets or 1)
     if args.json:
-        print(json.dumps(_status_json(snapshot), indent=2))
+        print_json(_status_json(snapshot))
         return EXIT_OK
     print(f"{info.object_id} ({info.model}), firmware {info.firmware}\n")
     lines = status_mod.render(snapshot)
@@ -168,6 +167,9 @@ def add_parsers(
 
 
 COMMANDS: dict[str, Command] = {
-    "status": Command(cmd_status),
+    "status": Command(cmd_status, fans_out=True),
+    # `meter-test` reads too, but it reads the same meter several times over
+    # several seconds and reports what moved; four of those in a row is a
+    # different measurement, not four of this one.
     "meter-test": Command(cmd_meter_test),
 }

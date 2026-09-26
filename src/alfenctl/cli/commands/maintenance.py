@@ -11,14 +11,22 @@ import sys
 import textwrap
 from datetime import datetime, timezone
 
+from devicectl.cli.command import Command, Need
+
 from alfenctl import clock, tilt
 from alfenctl.charger import AlfenCharger
-from alfenctl.upgrade import DEFAULT_REBOOT_TIMEOUT_S, REBOOT_SETTLE_S
-
-from alfenctl.cli.command import Command, Need
 from alfenctl.cli.exits import EXIT_ERROR, EXIT_OK
-from alfenctl.cli.output import CLOCK_FORMAT, confirm, print_rows, print_table
+from alfenctl.cli.output import (
+    CLOCK_FORMAT,
+    confirm,
+    print_json,
+    print_rows,
+    print_table,
+)
 from alfenctl.cli.report import wait_for_reboot
+from alfenctl.console import CONSOLE_COMMANDS, CONSOLE_UNKNOWN_NOTE
+from alfenctl.errors import AlfenError
+from alfenctl.upgrade import DEFAULT_REBOOT_TIMEOUT_S, REBOOT_SETTLE_S
 
 
 def cmd_time(charger: AlfenCharger, args: argparse.Namespace) -> int:
@@ -112,61 +120,6 @@ def cmd_reboot(charger: AlfenCharger, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-# What the console can do, as far as any of the three reverse-engineered
-# sources record it.  Three columns, because the sources disagree about how
-# much they know: the vendor's own label for the action, the string that
-# actually goes over the wire when a source shows one being sent, and the
-# alfenctl command that does the same thing through a documented endpoint.
-#
-# The labels are My Eve's (i18n_en.json, ``ChargingStationCommand.*``, kept
-# in research/android/android-findings.md); the app ships names for nineteen
-# commands but never the strings behind them, so most of the middle column
-# is blank and stays that way until someone reads one off a charger's log.
-# The strings that are filled in come from ICULanDevice (reboot, txerase,
-# date, eepromx erase config, forcefirmwarepermanent — see
-# research/windows/windows-findings.md) and, for `cansync off`, from a real
-# NG910 charger log: "taskCommandLine: Executing: system(cansync off)".
-# The list is not exhaustive: the console takes anything, and `cansync off`
-# was never in any app.
-CONSOLE_COMMANDS: tuple[tuple[str, str, str], ...] = (
-    ("Erase Config", "eepromx erase config", "erase settings"),
-    ("Erase Transactions", "txerase", "erase transactions"),
-    ("Erase Log Lines", "", ""),
-    ("Erase White List", "", "tags clear"),
-    ("Erase Local List", "", ""),
-    ("Erase Charging Profiles", "", "charging-profiles clear"),
-    ("Erase Display Memory", "", ""),
-    ("Dump White List", "", "tags list"),
-    ("Dump Local List", "", ""),
-    ("Show SCN Info", "", "scn status"),
-    ("Show Connected Meter Types", "", "meter-test"),
-    ("Show Flash Memory Info", "", ""),
-    ("Dump Flash Memory (Caution!)", "", ""),
-    ("Force Firmware Permanent", "forcefirmwarepermanent", ""),
-    ("Restart Modem (if applicable)", "", ""),
-    ("Run All Tests", "", ""),
-    ("Tamper detection On", "", ""),
-    ("Tamper detection Off", "", ""),
-    ("Show Debug On Display", "", ""),
-    ("Restart the station", "reboot", "reboot"),
-    ("Set the clock", "date <yyyy-mm-dd hh:mm:ss>", "time sync"),
-    ("Stop the CAN clock sync", "cansync off", ""),
-)
-
-
-# Why two thirds of the table above has no command in it.  Said wherever
-# the table is shown -- the terminal prints it under `alfenctl cmd --list`
-# and the web UI carries it into its own dialog (`GET /api/console`) --
-# because a table two-thirds full of "unknown" reads as a table
-# two-thirds broken until somebody says why.
-CONSOLE_UNKNOWN_NOTE = (
-    "The vendor apps name these commands but mostly do not record the string "
-    "that goes over the wire, so a blank console command means unknown, not "
-    "unavailable. The console accepts anything and validates nothing; prefer "
-    "the alfenctl command where there is one."
-)
-
-
 def _list_console_commands() -> int:
     """Print what the console is known to do, and how much of it is known."""
     print_table(
@@ -202,9 +155,37 @@ def cmd_cmd(charger: AlfenCharger | None, args: argparse.Namespace) -> int:
             print("Aborted.", file=sys.stderr)
             return EXIT_ERROR
     charger.send_command(command)
-    # The charger acknowledges the transfer, not the outcome: it reports what
-    # it actually did on its own event log.
-    print("Sent. The charger reports the result in its log ('alfenctl log').")
+    print("Submitted; execution is not confirmed. Check 'alfenctl log' for output.")
+    return EXIT_OK
+
+
+def cmd_diag(charger: AlfenCharger, args: argparse.Namespace) -> int:
+    """Submit a diagnostic command or read the endpoint's current result."""
+    if args.action == "result":
+        print_json(charger.fetch_diagnostic_result())
+        return EXIT_OK
+    command = args.diagnostic_command.strip()
+    if not command:
+        raise AlfenError("the diagnostic command must not be empty")
+    if not args.yes:
+        print(
+            "Diagnostic commands and parameters depend on the firmware. "
+            "Diagnostic operations may change the charger's state.",
+            file=sys.stderr,
+        )
+        if not confirm(
+            f"Send diagnostic {command!r} (sequence {args.sequence_id}) "
+            f"to {charger.station.ip}:{charger.station.port}?"
+        ):
+            print("Aborted.", file=sys.stderr)
+            return EXIT_ERROR
+    charger.send_diagnostic_command(command, args.sequence_id, args.parameters)
+    print(
+        f"Submitted diagnostic {command!r} (sequence {args.sequence_id}); "
+        "execution is not confirmed.\n"
+        "Read 'alfenctl diag result' on the same station and check the returned "
+        "command, sequence ID and finished flag."
+    )
     return EXIT_OK
 
 
@@ -315,6 +296,35 @@ def add_parsers(
     sp.add_argument("-y", "--yes", action="store_true", help="do not prompt")
 
     sp = sub.add_parser(
+        "diag",
+        help="submit a diagnostic command or retrieve its result",
+        description="Use the firmware-specific /api/diagtool interface. "
+        "Command names and parameters depend on the firmware; use its "
+        "diagnostic specification. Submission and completion are separate.",
+    )
+    dsub = sp.add_subparsers(dest="action", metavar="ACTION", required=True)
+    ds = dsub.add_parser(
+        "send", help="submit a diagnostic command (prompts first)", parents=[common]
+    )
+    ds.add_argument("diagnostic_command", metavar="COMMAND", help="diagnostic name")
+    ds.add_argument(
+        "parameters", nargs="*", metavar="PARAM", help="ordered string parameters"
+    )
+    ds.add_argument(
+        "--sequence-id",
+        required=True,
+        type=int,
+        metavar="N",
+        help="request sequence ID to match against the returned result",
+    )
+    ds.add_argument("-y", "--yes", action="store_true", help="do not prompt")
+    dsub.add_parser(
+        "result",
+        help="print current result JSON without submitting or polling",
+        parents=[common],
+    )
+
+    sp = sub.add_parser(
         "erase", help="erase settings, personal data or transactions", parents=[common]
     )
     sp.add_argument(
@@ -326,9 +336,10 @@ def add_parsers(
 
 
 COMMANDS: dict[str, Command] = {
-    "time": Command(cmd_time),
+    "time": Command(cmd_time, default_action="show", fans_out=("show",)),
     "calibrate": Command(cmd_calibrate),
     "reboot": Command(cmd_reboot),
     "cmd": Command(cmd_cmd, per_action={"list": Need.NOTHING}),
+    "diag": Command(cmd_diag),
     "erase": Command(cmd_erase),
 }

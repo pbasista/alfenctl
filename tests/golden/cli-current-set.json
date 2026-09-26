@@ -1,0 +1,52 @@
+[
+  {
+    "dest": "amps",
+    "flags": [],
+    "action": "_StoreAction",
+    "type": "float",
+    "metavar": "AMPS",
+    "choices": null,
+    "default": null,
+    "required": true,
+    "help": "the limit in amps (1-64)"
+  },
+  {
+    "flags": [
+      "--socket"
+    ],
+    "action": "_StoreAction",
+    "type": "int",
+    "metavar": "N",
+    "choices": [
+      "1",
+      "2"
+    ],
+    "default": null,
+    "required": false,
+    "help": "only this socket (default: every socket the charger reports)"
+  },
+  {
+    "flags": [
+      "--station-max"
+    ],
+    "action": "_StoreTrueAction",
+    "type": null,
+    "metavar": null,
+    "choices": null,
+    "default": false,
+    "required": false,
+    "help": "set the maximum for the whole station instead of a socket's"
+  },
+  {
+    "flags": [
+      "--external"
+    ],
+    "action": "_StoreTrueAction",
+    "type": null,
+    "metavar": null,
+    "choices": null,
+    "default": false,
+    "required": false,
+    "help": "write the external controller's request (0x212A_0) rather than the stored socket maximum; not kept across a reboot"
+  }
+]

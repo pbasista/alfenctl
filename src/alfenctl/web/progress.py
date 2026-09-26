@@ -1,17 +1,19 @@
-"""An upgrade's progress, turned into events for the browser.
+"""Where an upgrade's phases sit on the one bar the browser draws.
 
 A firmware job is one bar in the UI, but the work behind it comes in three
 parts of very different length: an optional download from Alfen's server,
 the upload to the charger, and the install the charger does on its own.
-Each gets a slice of the bar, so it keeps moving instead of sitting at
-100% for three minutes.  The slices are guesses about duration and nothing
-depends on them being right.
+:class:`devicectl.web.progress.JobReporter` maps a reporter's calls onto
+slices of that bar; what is here is where alfenctl's slices fall.
+
+They are guesses about duration and nothing depends on them being right --
+only on the bar continuing to move rather than sitting at 100% for three
+minutes while the charger installs.
 """
 
 from __future__ import annotations
 
-from alfenctl.report import Reporter, Wait
-from alfenctl.web.session import Job
+from devicectl.web.progress import JobReporter, Phases
 
 # Where a download from Alfen's server ends, when the job starts with one.
 DOWNLOAD_SHARE_OF_JOB = 0.15
@@ -21,50 +23,33 @@ UPLOAD_SHARE_OF_JOB = 0.6
 # Where the install phase ends, leaving the last sliver for the commit.
 INSTALL_SHARE_OF_JOB = 0.95
 
+UPGRADE_PHASES = Phases(
+    sending_ends=UPLOAD_SHARE_OF_JOB, waiting_ends=INSTALL_SHARE_OF_JOB
+)
 
-class JobReporter(Reporter):
-    """Reports an upgrade's progress onto a :class:`~alfenctl.web.session.Job`.
 
-    ``start`` is where the upload begins on the bar -- 0 for an uploaded
-    file, :data:`DOWNLOAD_SHARE_OF_JOB` when the image had to be fetched
-    first.  Warnings are kept as well as shown, because the job's result is
-    what the browser still has to look at once the run is over.
-    """
+# A download is one transfer and nothing else, so it gets the first slice of
+# the bar to itself; the upload that follows starts where it stopped.
+DOWNLOAD_PHASES = Phases(sending_ends=DOWNLOAD_SHARE_OF_JOB)
 
-    def __init__(self, job: Job, *, start: float = 0.0) -> None:
-        """Report onto ``job``, with the upload phase starting at ``start``."""
-        self.job = job
-        self.start = start
-        self.warnings: list[str] = []
 
-    def step(self, message: str) -> None:
-        """Show the new phase as the job's message."""
-        self.job.report(message=message, force=True)
+def upgrade_reporter(job, *, start: float = 0.0) -> JobReporter:
+    """Report an upgrade onto ``job``, with alfenctl's three phases."""
+    return JobReporter(job, start=start, phases=UPGRADE_PHASES)
 
-    def detail(self, message: str) -> None:
-        """Show a detail as the job's message; the browser has one line."""
-        self.job.report(message=message, force=True)
 
-    def warn(self, message: str) -> None:
-        """Show a warning and keep it for the job's result."""
-        self.warnings.append(message)
-        self.job.report(message=f"Warning: {message}", force=True)
+def download_reporter(job) -> JobReporter:
+    """Report a firmware download onto the first slice of ``job``'s bar."""
+    return JobReporter(job, phases=DOWNLOAD_PHASES)
 
-    def sending(self, sent: int, total: int, elapsed_s: float) -> None:
-        """Move the bar across the upload's slice."""
-        span = UPLOAD_SHARE_OF_JOB - self.start
-        self.job.report(self.start + span * (sent / total if total else 1.0))
 
-    def waiting(self, wait: Wait) -> None:
-        """Move the bar across the install's slice, by elapsed time."""
-        self.job.report(self._install_progress(wait))
-
-    def polled(self, wait: Wait) -> None:
-        """Move the bar, and say what the charger last answered."""
-        self.job.report(self._install_progress(wait), wait.label)
-
-    def _install_progress(self, wait: Wait) -> float:
-        """Map elapsed install time onto the install slice of the bar."""
-        span = INSTALL_SHARE_OF_JOB - UPLOAD_SHARE_OF_JOB
-        done = min(wait.elapsed_s / wait.deadline_s, 1.0) if wait.deadline_s else 1.0
-        return UPLOAD_SHARE_OF_JOB + span * done
+__all__ = [
+    "DOWNLOAD_PHASES",
+    "DOWNLOAD_SHARE_OF_JOB",
+    "INSTALL_SHARE_OF_JOB",
+    "UPGRADE_PHASES",
+    "UPLOAD_SHARE_OF_JOB",
+    "JobReporter",
+    "download_reporter",
+    "upgrade_reporter",
+]

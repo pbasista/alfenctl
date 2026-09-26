@@ -1,20 +1,22 @@
-/* The Network tab: where the charger is, and how it got there.
+/* The Connectivity tab: where the charger is, and how it got there.
+ *
+ * Called Connectivity rather than Network because "network" is already a
+ * word about charging stations -- the charging network an operator runs
+ * them on, which is what the Backoffice tab is about.  A tab named for it
+ * that turns out to hold interface addresses and a Wi-Fi scan is a tab that
+ * sends people to the wrong place twice.
  *
  * The interface addresses (read-only, the way the CLI prints them), the
  * Wi-Fi radio's scan and join, the live smart-meter wiring test, and the
  * custom Modbus register map for a meter the charger does not know.
  */
 
-import { html, useEffect, useState } from '../vendor/preact-htm.module.js';
-import {
-  Loading,
-  PanelCard,
-  PanelError,
-  usePanel,
-} from './panels.js';
-import { Card, Row } from './ui.js';
+import { Loading, PanelCard, PanelError, panelWait, usePanel } from '/core/js/panels.js';
+import { Card, caller, Row } from '/core/js/ui.js';
+import { html, useState } from '/core/vendor/preact-htm.module.js';
 
 function WifiScan({ readOnly, busy, api, toast }) {
+  const call = caller(toast);
   const [doc, setDoc] = useState(null);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState('');
@@ -48,7 +50,7 @@ function WifiScan({ readOnly, busy, api, toast }) {
 
   const nets = doc?.networks || [];
   return html`<${Card} title="Wi-Fi">
-    <div class="actions-row">
+    <div class="actions">
       <button class="btn" disabled=${scanning || busy} onClick=${scan}>
         ${scanning ? 'Scanning...' : 'Scan for networks'}
       </button>
@@ -95,7 +97,7 @@ function WifiScan({ readOnly, busy, api, toast }) {
             ${n.securityLabel} -- ${n.signal} (${n.signalDbm} dBm)
           </div>
           ${joining === n.ssid &&
-          html`<div class="actions-row">
+          html`<div class="actions">
             <input
               type="password"
               placeholder="passphrase"
@@ -112,15 +114,12 @@ function WifiScan({ readOnly, busy, api, toast }) {
       )}
     </div>`}
     ${!readOnly &&
-    html`<div class="actions-row">
+    html`<div class="actions">
       <button
         class="btn ghost"
         disabled=${busy}
         onClick=${() =>
-          api
-            .post('/wifi', { action: 'enable' })
-            .then(() => toast.ok('Wi-Fi radio enabled.'))
-            .catch((err) => toast.error(err.message))}
+          call(() => api.post('/wifi', { action: 'enable' }), 'Wi-Fi radio enabled.')}
       >
         Enable radio
       </button>
@@ -128,10 +127,7 @@ function WifiScan({ readOnly, busy, api, toast }) {
         class="btn ghost"
         disabled=${busy}
         onClick=${() =>
-          api
-            .post('/wifi', { action: 'disconnect' })
-            .then(() => toast.ok('Wi-Fi radio switched off.'))
-            .catch((err) => toast.error(err.message))}
+          call(() => api.post('/wifi', { action: 'disconnect' }), 'Wi-Fi radio switched off.')}
       >
         Switch radio off
       </button>
@@ -140,24 +136,8 @@ function WifiScan({ readOnly, busy, api, toast }) {
 }
 
 function MeterTest({ busy, api }) {
-  const [doc, setDoc] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [doc, loading, error, read] = usePanel('meter-test', () => api.get('/meter-test'));
 
-  const read = async () => {
-    setLoading(true);
-    setError('');
-    try {
-      setDoc(await api.get('/meter-test'));
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-  useEffect(() => {
-    if (doc === null && !error) read();
-  }, []);
   if (doc === null && !error) {
     return html`<${Loading} loading=${loading} what="Reading the meter test..." title="Smart-meter test" />`;
   }
@@ -190,14 +170,16 @@ function MeterTest({ busy, api }) {
 }
 
 function MeterMap({ readOnly, busy, api, toast }) {
-  const [doc, loading, error, read] = usePanel('meter-map', () => api.get('/meter-map'));
-  if (error) return html`<${PanelError} error=${error} loading=${loading} onRetry=${read} title="Custom meter map" />`;
-  if (!doc) return html`<${Loading} loading=${loading} what="Reading the meter map..." title="Custom meter map" />`;
+  const panel = usePanel('meter-map', () => api.get('/meter-map'));
+  const [doc] = panel;
+  const waiting = panelWait(panel, { title: 'Custom meter map', what: 'Reading the meter map...' });
+  if (waiting !== undefined) return waiting;
 
-  const map = doc.meterMap || {};
+const map = doc.meterMap || {};
   const entries = map.entries || [];
   return html`<${Card}
     title="Custom meter map"
+    immediate=${!readOnly}
     actions=${entries.length > 0 && html`<span class="badge">${entries.length} of ${map.capacity}</span>`}
     width="full"
   >
@@ -229,7 +211,7 @@ function MeterMap({ readOnly, busy, api, toast }) {
           </table>
         </div>`}
     ${!readOnly &&
-    html`<div class="actions-row">
+    html`<div class="actions">
       <input
         type="file"
         accept=".json,application/json"
@@ -252,21 +234,23 @@ function MeterMap({ readOnly, busy, api, toast }) {
   <//>`;
 }
 
-export function Network({ api, readOnly, busy, toast }) {
-  const [netDoc, netLoading, netError, netRead] = usePanel('network', () => api.get('/network'));
+export function Connectivity({ api, readOnly, busy, toast }) {
+  const [netDoc, netLoading, netError, netRead] = usePanel('connectivity', () =>
+    api.get('/connectivity')
+  );
   return html`<div class="grid">
     ${netError
       ? html`<${PanelError} error=${netError} loading=${netLoading} onRetry=${netRead} title="Interfaces" />`
       : netDoc
         ? html`<${PanelCard}
             title="Interfaces"
-            rows=${netDoc.network?.rows}
-            note="Where the charger is on the network."
+            rows=${netDoc.connectivity?.rows}
+            note="Where the charger is reachable."
             more="Read only, and as the CLI reports it: these are the addresses the
               charger answers with. The Wi-Fi radio is joined from the card beside this
               one, and a wired address is set on the charger itself."
           />`
-        : html`<${Loading} loading=${netLoading} what="Reading the network..." title="Interfaces" />`}
+        : html`<${Loading} loading=${netLoading} what="Reading the interfaces..." title="Interfaces" />`}
     <${WifiScan} readOnly=${readOnly} busy=${busy} api=${api} toast=${toast} />
     <${MeterTest} busy=${busy} api=${api} />
     <${MeterMap} readOnly=${readOnly} busy=${busy} api=${api} toast=${toast} />

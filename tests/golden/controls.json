@@ -1,0 +1,110 @@
+{
+  "state": {
+    "station_max_a": 32.0,
+    "installation_max_a": 25.0,
+    "sockets": {
+      "1": 16.0,
+      "2": 5.0
+    },
+    "socket_count": 2,
+    "intensity": 80,
+    "auto_dim": true,
+    "auto_dim_raw": 1,
+    "temp_alarm_low_c": -25.0,
+    "temp_alarm_high_c": 70.0,
+    "external_max_a": {
+      "1": 10.0,
+      "2": 8.0
+    },
+    "effective_a": {
+      "1": {
+        "static": 14.0,
+        "active": 12.0,
+        "P1": 11.0
+      },
+      "2": {
+        "static": 14.0,
+        "active": 12.0,
+        "P1": 11.0
+      }
+    }
+  },
+  "warnings": [
+    {
+      "short": "socket 2 is below the charging minimum",
+      "detail": "socket 2 is set to 5 A, under the 6 A floor Mode 3 can offer a car; the socket will not charge at all, not slowly"
+    }
+  ],
+  "rows": [
+    [
+      "Station maximum",
+      "32 A"
+    ],
+    [
+      "Installation maximum",
+      "25 A"
+    ],
+    [
+      "Socket 1 maximum",
+      "16 A"
+    ],
+    [
+      "  external request",
+      "10 A"
+    ],
+    [
+      "  now allowing",
+      "14 A static, 12 A active, 11 A P1"
+    ],
+    [
+      "Socket 2 maximum",
+      "5 A"
+    ],
+    [
+      "  external request",
+      "8 A"
+    ],
+    [
+      "  now allowing",
+      "14 A static, 12 A active, 11 A P1"
+    ],
+    [
+      "Intensity",
+      "80%"
+    ],
+    [
+      "Auto dim",
+      "on"
+    ]
+  ],
+  "json": {
+    "stationMaxCurrentA": 32.0,
+    "installationMaxCurrentA": 25.0,
+    "socketCount": 2,
+    "intensity": 80,
+    "autoDim": true,
+    "temperatureAlarmLowC": -25.0,
+    "temperatureAlarmHighC": 70.0,
+    "sockets": [
+      {
+        "number": 1,
+        "maxCurrentA": 16.0
+      },
+      {
+        "number": 2,
+        "maxCurrentA": 5.0
+      }
+    ],
+    "minAlarmTemperatureC": -40.0,
+    "maxAlarmTemperatureC": 100.0,
+    "minCurrentA": 1.0,
+    "maxCurrentA": 64.0,
+    "minChargeCurrentA": 6.0,
+    "warnings": [
+      {
+        "short": "socket 2 is below the charging minimum",
+        "detail": "socket 2 is set to 5 A, under the 6 A floor Mode 3 can offer a car; the socket will not charge at all, not slowly"
+      }
+    ]
+  }
+}

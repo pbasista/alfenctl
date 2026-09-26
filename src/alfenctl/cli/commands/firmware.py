@@ -13,10 +13,22 @@ import sys
 from pathlib import Path
 
 import httpx
+from devicectl.cli.command import Command
+from devicectl.progress import BYTES_PER_KB, BYTES_PER_MB, fmt_duration
 
 from alfenctl.charger import AlfenCharger, ChargerInfo
+from alfenctl.cli.exits import (
+    EXIT_ERROR,
+    EXIT_INCOMPATIBLE,
+    EXIT_NO_FIRMWARE,
+    EXIT_OK,
+    EXIT_UPDATE_FAILED,
+    EXIT_UPLOAD_IN_PROGRESS,
+)
+from alfenctl.cli.output import confirm, error, may_overwrite
+from alfenctl.cli.report import TerminalReporter
+from alfenctl.cli.target import repo_config
 from alfenctl.firmware import FirmwareFile, check_compatibility
-from alfenctl.progress import BYTES_PER_KB, BYTES_PER_MB, fmt_duration
 from alfenctl.repo import (
     Candidate,
     RepoConfig,
@@ -36,19 +48,6 @@ from alfenctl.upgrade import (
     install,
     send_image,
 )
-
-from alfenctl.cli.command import Command
-from alfenctl.cli.exits import (
-    EXIT_ERROR,
-    EXIT_INCOMPATIBLE,
-    EXIT_NO_FIRMWARE,
-    EXIT_OK,
-    EXIT_UPDATE_FAILED,
-    EXIT_UPLOAD_IN_PROGRESS,
-)
-from alfenctl.cli.output import confirm
-from alfenctl.cli.report import TerminalReporter
-from alfenctl.cli.target import repo_config
 
 # Column width of the file-name column in the firmware picker.
 NAME_COLUMN_WIDTH = 40
@@ -120,6 +119,7 @@ def choose_firmware(
     cache_dir: Path | None = None,
     include_all: bool = False,
     yes: bool = False,
+    debug: bool = False,
 ) -> Path | None:
     """List what Alfen publishes for this charger, pick one, and download it.
 
@@ -151,7 +151,10 @@ def choose_firmware(
         chosen = _ask_for_choice(cands, default)
         if chosen is None:
             return None
-    return download(chosen.fw, info.family, config=config, cache_dir=cache_dir)
+    with TerminalReporter(debug=debug) as report:
+        return download(
+            chosen.fw, info.family, config=config, cache_dir=cache_dir, report=report
+        )
 
 
 # --- alfenctl firmware --------------------------------------------------------------------
@@ -167,7 +170,7 @@ def cmd_firmware(charger: AlfenCharger, args: argparse.Namespace) -> int:
             return _show_list(info, config, cache_dir, include_all=args.all)
         return _upgrade(charger, args, info, config, cache_dir)
     except (UploadInProgress, InstallFailed, RepositoryError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        error(str(exc))
         return next(
             (code for kind, code in EXIT_FOR if isinstance(exc, kind)), EXIT_ERROR
         )
@@ -211,6 +214,7 @@ def _upgrade(
             cache_dir=cache_dir,
             include_all=args.all,
             yes=args.yes,
+            debug=args.debug,
         )
         if path is None:
             print("Cancelled.", file=sys.stderr)
@@ -225,8 +229,8 @@ def _upgrade(
         print(f"  - {note}")
     for warning in result.warnings:
         print(f"  ! {warning}")
-    for error in result.errors:
-        print(f"  x {error}")
+    for objection in result.errors:
+        print(f"  x {objection}")
     if not result.ok:
         print(
             "\nAborting: firmware file is not compatible with this charger.",
@@ -292,12 +296,7 @@ def cmd_logo(charger: AlfenCharger, args: argparse.Namespace) -> int:
         # and the package may well be meant for a different station.
         package, kind, box = build_package(charger, image)
         destination = package_path(Path(args.save), kind)
-        if (
-            destination.exists()
-            and not args.yes
-            and not confirm(f"'{destination}' already exists. Overwrite?")
-        ):
-            print("Aborted.", file=sys.stderr)
+        if not may_overwrite(destination, yes=args.yes):
             return EXIT_ERROR
         destination.write_bytes(package)
         print(

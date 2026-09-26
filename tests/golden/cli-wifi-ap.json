@@ -1,0 +1,32 @@
+[
+  {
+    "flags": [
+      "--enable"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": null,
+    "choices": [
+      "on",
+      "off"
+    ],
+    "default": null,
+    "required": false,
+    "help": "start the access point after a boot"
+  },
+  {
+    "flags": [
+      "--start"
+    ],
+    "action": "_StoreAction",
+    "type": null,
+    "metavar": null,
+    "choices": [
+      "on",
+      "off"
+    ],
+    "default": null,
+    "required": false,
+    "help": "start it now"
+  }
+]

@@ -45,7 +45,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
+from devicectl.report import SILENT, Reporter
+
 from alfenctl.charger import AlfenCharger
+from alfenctl.discovery import Station, discover
 from alfenctl.errors import AlfenError
 
 P_NAME = (0x2180, 1)
@@ -217,3 +221,54 @@ def next_socket_id(members: list[Peer]) -> int:
     if not members:
         return 0
     return max(p.membership.socket_id + p.own_sockets for p in members)
+
+
+def probe_peers(
+    discover_time: float,
+    exclude_ip: str,
+    username: str,
+    password: str,
+    *,
+    debug: bool = False,
+    reporter: Reporter = SILENT,
+) -> list[tuple[Station, Peer]]:
+    """Log into every other charger the LAN offers and read its SCN membership.
+
+    A station that does not answer, or rejects these credentials, is skipped
+    with a warning rather than failing the whole probe -- it is as likely to
+    be unrelated hardware on the same LAN as it is to be an unreachable
+    member (see this module's docstring for why alfenctl, unlike the app,
+    cannot tell those two apart without a login).
+
+    The warning goes to ``reporter`` rather than to stderr, because both
+    front ends call this: the CLI wants it on the terminal, and the web UI
+    wants it on the event stream rather than in the server's own log.
+    """
+    found: list[tuple[Station, Peer]] = []
+    for station in discover(discover_time):
+        if station.ip == exclude_ip:
+            continue
+        peer = AlfenCharger(station, username, password, debug=debug)
+        try:
+            peer.login()
+            membership = read_membership(peer)
+            info = peer.basic_info()
+        except httpx.HTTPError as exc:
+            reporter.warn(
+                f"could not log into {station.object_id} ({station.ip}): {exc}"
+            )
+            continue
+        finally:
+            peer.close()
+        found.append(
+            (
+                station,
+                Peer(
+                    object_id=info.object_id,
+                    identity=info.identity or info.object_id,
+                    own_sockets=info.sockets or 1,
+                    membership=membership,
+                ),
+            )
+        )
+    return found

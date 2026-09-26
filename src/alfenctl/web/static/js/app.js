@@ -7,30 +7,89 @@
  * other without either of them polling.
  */
 
-import { html, render, useEffect, useRef, useState } from '../vendor/preact-htm.module.js';
-import { Access } from './access.js';
-import { Actions } from './actions.js';
-import * as api from './api.js';
-import { Backoffice } from './backoffice.js';
-import { Charging } from './charging.js';
-import { Dashboard } from './dashboard.js';
-import { Logs, logGapNote } from './logs.js';
-import { Network } from './network.js';
-import { Bell, useTabAlerts } from './notify.js';
-import { putPanel, resetPanels } from './panels.js';
-
-import { EMPTY_PROPERTIES, Properties } from './properties.js';
-import { Sessions } from './sessions.js';
+import { configure as configureApi } from '/core/js/api.js';
+import { DraftDialog, PageApply, resetDrafts } from '/core/js/drafts.js';
+import { Bell, configure as configureNotify, useTabAlerts } from '/core/js/notify.js';
+import { putPanel, resetPanels } from '/core/js/panels.js';
 import {
-  ago,
-  ConnectionPill,
-  Dialog,
+  Brand,
+  configure as configureShell,
+  DeviceId,
+  Glyph,
+  Header,
+  License,
+  Pane,
+  ThemeToggle,
+  useFavicon,
+  useServerLink,
+  useTabs,
+  useTheme,
+  Watchers,
+} from '/core/js/shell.js';
+import {
+  caller,
   LiveToggle,
   OfflineNotice,
   Toasts,
   useSteadyBusy,
   useToasts,
-} from './ui.js';
+} from '/core/js/ui.js';
+import { html, render, useEffect, useRef, useState } from '/core/vendor/preact-htm.module.js';
+
+import { Access } from './access.js';
+import { Actions } from './actions.js';
+import * as api from './api.js';
+import { Backoffice } from './backoffice.js';
+import { Charging } from './charging.js';
+import { ConnectionPill } from './conn.js';
+import { Connectivity } from './connectivity.js';
+import { Dashboard } from './dashboard.js';
+import { Fleet, isCurrent } from './fleet.js';
+import { Logs, logGapNote } from './logs.js';
+import { EMPTY_PROPERTIES, Properties } from './properties.js';
+import { Sessions } from './sessions.js';
+import { StationPicker } from './stations.js';
+
+/* What this program calls itself, to the three shared modules that write a
+ * sentence or keep a key with the name in it.
+ *
+ * Where it lives on the web, where its releases are and where its licence
+ * is used to be three more constants here.  They are `[project.urls]` in
+ * `pyproject.toml` now, and the shared `Brand` and `License` read them off
+ * `GET /api/about` -- so a repository that moves is one line in one file.
+ */
+const NAME = 'alfenctl';
+
+configureApi({ name: NAME });
+configureNotify({ name: NAME });
+configureShell({ name: NAME });
+
+/* --- the mark ------------------------------------------------------------
+ *
+ * The bolt.  It was the character U+26A1 in the header and a differently
+ * drawn bolt percent-encoded into index.html for the tab -- so the two
+ * places this program's mark appears were an emoji whose shape, weight and
+ * colour belonged to whichever platform was drawing it, and a hand-encoded
+ * SVG nobody was ever going to edit twice.  The header's is the one that
+ * was right, so this is that bolt, drawn rather than typed: the same shape
+ * at any size, in this program's own amber, and something a browser will
+ * actually put in a tab.
+ *
+ * Worn in both places by `Glyph` and `useFavicon`; `currentColor` is the
+ * header's text there and `--tab-mark` in the tab.
+ */
+const MARK = {
+  viewBox: '0 0 16 16',
+  shapes: [
+    [
+      'path',
+      {
+        d: 'M9.9 1.4 3.9 9.2h3.3l-1.1 5.4 6-7.8H8.8z',
+        fill: 'currentColor',
+      },
+    ],
+  ],
+};
 
 /* The tabs, in the order someone works down them: what the charger is
  * doing, then what it is set to do, then what it has done, then the two
@@ -39,80 +98,31 @@ import {
  * The log used to be a radio button inside a "History" tab, two clicks
  * from anywhere and invisible until you found it -- which for the one
  * thing that answers "why did it stop charging at 3am" is the wrong place
- * entirely.  It is a tab, beside the sessions it explains. */
+ * entirely.  It is a tab, beside the sessions it explains.
+ *
+ * The Fleet is first, and so is the landing tab, because "which station is
+ * this page about" is the question that comes before every other one on the
+ * page -- and because the page had no answer to "what have I got" at all,
+ * only a dialog behind a button for changing station.  It is the same view,
+ * out of the same tiles, as jkctl's Bank.
+ *
+ * "Connectivity" was "Network", which on a page about charging stations is
+ * the operator's charging network -- the thing the Backoffice tab is about.
+ * A tab called Network that holds interface addresses and a Wi-Fi scan
+ * sends people to the wrong one twice. */
 const TABS = [
+  ['fleet', 'Fleet'],
   ['dashboard', 'Dashboard'],
   ['charging', 'Charging'],
   ['sessions', 'Sessions'],
   ['logs', 'Logs'],
   ['access', 'Access'],
-  ['network', 'Network'],
+  ['connectivity', 'Connectivity'],
   ['backoffice', 'Backoffice'],
   ['properties', 'Properties'],
   ['actions', 'Actions'],
 ];
 
-
-/* Where an explicit theme choice is kept, and the key that used to hold it.
- *
- * The old one was written on every load, so every browser that ever opened
- * this page has "dark" stored in it and would never see the system default
- * this version starts from.  A new key retires that; the old one is dropped
- * on the way past. */
-const THEME_KEY = 'alfenctl-theme-mode';
-const OLD_THEME_KEY = 'alfenctl-theme';
-
-/* system first: a station checked from a laptop in a bright office and one
- * checked from a phone in a dark garage want different pages, and the
- * machine already knows which. */
-const THEMES = ['system', 'light', 'dark'];
-
-/* What all three theme marks share: the live switch's box, its stroke
- * weight and its cap -- so the header's icons are one set. */
-const THEME_SVG = {
-  viewBox: '0 0 16 16',
-  width: 15,
-  height: 15,
-  fill: 'none',
-  stroke: 'currentColor',
-  'stroke-width': 1.5,
-  'stroke-linecap': 'round',
-  'stroke-linejoin': 'round',
-  'aria-hidden': 'true',
-  focusable: 'false',
-};
-
-/* The three theme marks, drawn rather than typed.
- *
- * They were the characters U+25D0, U+2600 and U+263E, and a font decides
- * how big a character is: the sun came with its own generous side
- * bearings, the moon was set at cap height beside it, and the half-filled
- * circle standing for "follow the system" was drawn smaller than either.
- * Three buttons of one size holding three marks of three sizes, in a
- * header whose other icon -- the live switch -- is a 15px drawing.  These
- * are that drawing's siblings, at one optical size, with no font in the
- * decision.
- *
- * The system mark is a disc half filled: the two themes in one circle,
- * which says "whichever of them the machine is on" without introducing a
- * third idea for it. */
-const THEME_ICON = {
-  system: html`<svg ...${THEME_SVG}>
-    <circle cx="8" cy="8" r="5.6" />
-    <path d="M8 2.4a5.6 5.6 0 0 0 0 11.2z" fill="currentColor" stroke="none" />
-  </svg>`,
-  light: html`<svg ...${THEME_SVG}>
-    <circle cx="8" cy="8" r="3.4" />
-    <path
-      d="M8 1.1v1.7M8 13.2v1.7M1.1 8h1.7M13.2 8h1.7M3.15 3.15l1.2 1.2M11.65 11.65l1.2 1.2M12.85 3.15l-1.2 1.2M4.35 11.65l-1.2 1.2"
-    />
-  </svg>`,
-  dark: html`<svg ...${THEME_SVG}>
-    <path d="M13.4 9.6A5.9 5.9 0 0 1 6.4 2.6a5.9 5.9 0 1 0 7 7z" />
-  </svg>`,
-};
-
-const LIGHT_QUERY = '(prefers-color-scheme: light)';
 
 /* How many log lines the page holds.
  *
@@ -169,212 +179,41 @@ function comeForward() {
   }, TITLE_FLASH_MS);
 }
 
-/* The page's theme: the system's, unless this browser has said otherwise.
+/* Everything the Actions tab can ask the charger to do.
  *
- * Resolved here rather than in the stylesheet.  `app.css` is dark on `:root`
- * and light behind `[data-theme="light"]`, so answering
- * `prefers-color-scheme` in CSS as well would mean keeping the whole light
- * palette written twice; this stamps the attribute the sheet already reads.
- * The page does not run without JavaScript anyway -- there is a `<noscript>`
- * on it saying so.
+ * Sixteen one-line closures over `call`, which is sixteen lines in the
+ * middle of `App` that say nothing except which endpoint goes with which
+ * prop.  As a table they are readable as a table: the whole of what that
+ * tab can do, in one place, beside the words it says when it works.
+ *
+ * `(r) => r.message` is the server's own sentence -- "rebooting", "erased
+ * 412 transactions" -- which is better than anything this page could write
+ * for it, and the only thing that knows how many.
  */
-function useTheme() {
-  const [mode, setMode] = useState(() => {
-    const stored = localStorage.getItem(THEME_KEY);
-    return THEMES.includes(stored) ? stored : 'system';
-  });
-
-  useEffect(() => localStorage.removeItem(OLD_THEME_KEY), []);
-
-  useEffect(() => {
-    const media = window.matchMedia(LIGHT_QUERY);
-    const stamp = () => {
-      document.documentElement.dataset.theme =
-        mode === 'system' ? (media.matches ? 'light' : 'dark') : mode;
-    };
-    stamp();
-    if (mode !== 'system') return undefined;
-    // Only while following the system is there anything to follow.
-    media.addEventListener('change', stamp);
-    return () => media.removeEventListener('change', stamp);
-  }, [mode]);
-
-  const next = THEMES[(THEMES.indexOf(mode) + 1) % THEMES.length];
+function useCommands(call) {
   return {
-    mode,
-    next,
-    /* A choice is remembered; the resolved theme is not.  Writing it back on
-     * every load is what left every browser pinned to the old default. */
-    cycle: () => {
-      setMode(next);
-      localStorage.setItem(THEME_KEY, next);
-    },
+    onReboot: () => call(() => api.post('/actions/reboot'), (r) => r.message),
+    onTimeSync: () => call(() => api.post('/actions/time-sync'), 'Charger clock set.'),
+    onLogo: (file) => call(() => api.upload('/actions/logo', file), 'Logo upload started.'),
+    onFirmware: (file) =>
+      call(() => api.upload('/actions/firmware', file), 'Firmware upload started.'),
+    onFirmwareList: (all) => api.get('/firmware/available', all ? { all: '1' } : {}),
+    onFirmwareRelease: (name) =>
+      call(() => api.post('/actions/firmware-release', { name }), `Installing ${name}.`),
+    onTilt: () => call(() => api.post('/tilt'), (r) => r.message),
+    onConsole: (command) => call(() => api.post('/console', { command }), (r) => r.message),
+    onConsoleList: () => api.get('/console'),
+    /* Not through `call`: the panel shows the reply and the failure in its
+     * own card, beside the command that caused them, rather than in a
+     * toast that has scrolled away by the time the result is read. */
+    onDiagnosticSend: (payload) => api.post('/diag', payload),
+    onDiagnosticResult: () => api.get('/diag'),
+    onErase: (target) => call(() => api.post('/erase', { target }), (r) => r.message),
   };
-}
-
-/* Which tab the address bar is asking for.
- *
- * The tab is in the URL so a reload comes back where you were, and so a
- * link to "the logs on this charger" is a link somebody can send. */
-function tabFromHash() {
-  const asked = (window.location.hash || '').replace(/^#/, '');
-  return TABS.some(([id]) => id === asked) ? asked : TABS[0][0];
-}
-
-/* How long a dropped event stream may spend trying before the page calls
- * the server gone.
- *
- * EventSource reconnects on its own within a few seconds, so a server
- * being restarted -- `alfenctl ui` stopped and started again -- comes back
- * inside this and the page never says anything.  Longer than this is a
- * server that is not coming back by itself, which is worth a banner. */
-const SERVER_GRACE_MS = 6000;
-
-/* Whether the program behind this page is still there.
- *
- * `connecting` until the stream first opens, then `online`; `reconnecting`
- * the moment anything fails to reach the server, and `offline` if it is
- * still failing when the grace runs out.  A failed fetch counts as well as
- * a dropped stream: a click is often what finds out first, and a page that
- * only listened to the stream would keep taking orders for a charger it
- * cannot reach.
- */
-function useServerLink() {
-  const [state, setState] = useState('connecting');
-  const timer = useRef(null);
-
-  const clear = () => {
-    if (timer.current) {
-      clearTimeout(timer.current);
-      timer.current = null;
-    }
-  };
-
-  const lost = () => {
-    setState((was) => (was === 'offline' ? was : 'reconnecting'));
-    if (timer.current) return;
-    timer.current = setTimeout(() => {
-      timer.current = null;
-      setState('offline');
-    }, SERVER_GRACE_MS);
-  };
-
-  const found = () => {
-    clear();
-    setState('online');
-  };
-
-  useEffect(() => api.onUnreachable(lost), []);
-  useEffect(() => clear, []);
-
-  return { state, lost, found, offline: state === 'offline' };
-}
-
-function StationPicker({ onPick, onClose, toast }) {
-
-  const [stations, setStations] = useState(null);
-  const [host, setHost] = useState('');
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-
-  useEffect(() => {
-    api
-      .get('/stations')
-      .then(setStations)
-      .catch((err) => {
-        toast.error(err.message);
-        setStations({ configured: [], discovered: [] });
-      });
-  }, []);
-
-  const all = stations
-    ? [...stations.configured, ...stations.discovered.filter(
-        (d) => !stations.configured.some((c) => c.host === d.host || c.name === d.name)
-      )]
-    : [];
-
-  return html`<div class="backdrop" onClick=${(e) => e.target === e.currentTarget && onClose()}>
-    <div class="modal" style="width:min(560px,100%)">
-      <h3>Choose a station</h3>
-      ${stations === null
-        ? html`<p>Looking for chargers on this network...</p>`
-        : all.length === 0
-          ? html`<p>None found by mDNS and none in your config file. Enter an address below.</p>`
-          : html`<div class="scroller stack">
-              ${all.map(
-                (station) => html`<button
-                  class="btn pick"
-                  key=${station.name + station.host}
-                  onClick=${() => onPick({ name: station.name, host: station.host, port: station.port })}
-                >
-                  <strong>${station.name}</strong>
-                  <span class="muted"> ${station.host || ''} · ${station.source}</span>
-                </button>`
-              )}
-            </div>`}
-      <div class="field">
-        <span class="lab">or an address directly</span>
-        <div class="actions-row">
-          <input type="text" placeholder="192.168.1.42" class="grow" value=${host} onInput=${(e) => setHost(e.target.value)} />
-          <input type="text" placeholder="user" class="grow narrow" value=${username} onInput=${(e) => setUsername(e.target.value)} />
-          <input type="password" placeholder="password" class="grow narrow" value=${password} onInput=${(e) => setPassword(e.target.value)} />
-        </div>
-      </div>
-      <div class="buttons">
-        <button class="btn ghost" onClick=${onClose}>Cancel</button>
-        <button
-          class="btn primary"
-          disabled=${!host.trim()}
-          onClick=${() => onPick({ host: host.trim(), username: username || undefined, password: password || undefined })}
-        >
-          Connect
-        </button>
-      </div>
-    </div>
-  </div>`;
-}
-
-/* Who else has this page open.  The link pill counts them because they all
- * share one charger connection; this says which they are, so "someone is
- * holding the station" has a face -- the tab on the next desk, or the phone
- * in the garage. */
-function Watchers({ me, onClose, toast }) {
-  const [rows, setRows] = useState(null);
-
-  useEffect(() => {
-    api
-      .get('/clients')
-      .then((doc) => setRows(doc.clients))
-      .catch((err) => {
-        toast.error(err.message);
-        setRows([]);
-      });
-  }, []);
-
-  const now = Date.now() / 1000;
-  return html`<${Dialog} title="Browsers watching" onClose=${onClose} width=${560}>
-    ${rows === null
-      ? html`<p class="note flush">Asking the server...</p>`
-      : rows.length === 0
-        ? html`<div class="empty">No open event streams.</div>`
-        : html`<div class="scroller">
-            ${rows.map(
-              (row) => html`<div class=${`entry${row.id === me ? ' you' : ''}`} key=${row.id}>
-                <div class="head">
-                  <span class="name">${row.label}</span>
-                  ${row.id === me && html`<span class="badge good">this browser</span>`}
-                  <span class="act name data">${row.address}${row.port ? `:${row.port}` : ''}</span>
-                </div>
-                <div class="meta" title=${row.agent}>
-                  watching for ${ago(Math.max(0, now - (row.since || now)))}
-                </div>
-              </div>`
-            )}
-          </div>`}
-  <//>`;
 }
 
 function App() {
+  useFavicon(MARK);
   const [state, setState] = useState(null);
   const [link, setLink] = useState({ state: 'released' });
   const [info, setInfo] = useState(null);
@@ -385,15 +224,23 @@ function App() {
   const [propertyView, setPropertyView] = useState(EMPTY_PROPERTIES);
   const [logLines, setLogLines] = useState([]);
   const [logLoading, setLogLoading] = useState(false);
-  const [tab, setTab] = useState(tabFromHash);
+  const nav = useTabs(TABS);
+  const { tab } = nav;
   /* Which tabs have been opened.  A tab is built the first time it is
    * asked for and then stays built, hidden rather than thrown away: what
    * it read is still there, and so is the half-typed value in it and where
    * the log was scrolled to.  Switching away and back used to unmount the
    * lot and re-read a charger that had not changed. */
-  const [seen, setSeen] = useState(() => new Set([tabFromHash()]));
+  const [seen, setSeen] = useState(() => new Set([tab]));
+  useEffect(() => {
+    setSeen((known) => (known.has(tab) ? known : new Set([...known, tab])));
+  }, [tab]);
   const [picking, setPicking] = useState(false);
   const [watching, setWatching] = useState(false);
+  /* Every station this server can see, for the Fleet tab.  Read when that
+   * tab is first opened rather than on load: it is an mDNS sweep, and a
+   * page opened straight at `#logs` has no use for it. */
+  const [fleet, setFleet] = useState(null);
   const [me, setMe] = useState(null);
   const theme = useTheme();
   const toast = useToasts();
@@ -412,7 +259,7 @@ function App() {
    * excluded (`quiet`, set by the worker for the tasks nobody asked for),
    * and what is left has to last long enough to be worth showing. */
   const busy = useSteadyBusy(
-    (link.state === 'busy' || link.state === 'connecting') && !link.quiet
+    (link.state === 'busy' || link.state === 'opening') && !link.quiet
   );
 
   /* Read the world afresh: what the server holds, and what it knows about
@@ -478,19 +325,7 @@ function App() {
       onerror: () => server.lost(),
     });
     resync();
-    /* Whatever the address bar asked for is being shown already; this is
-     * what makes opening `#logs` directly read the log, rather than
-     * landing on an empty one until you click the tab you are on. */
-    show(tabFromHash());
     return stop;
-  }, []);
-
-
-  /* Follow the tab in the address bar, so Back and a pasted link work. */
-  useEffect(() => {
-    const follow = () => show(tabFromHash());
-    window.addEventListener('hashchange', follow);
-    return () => window.removeEventListener('hashchange', follow);
   }, []);
 
 
@@ -509,22 +344,33 @@ function App() {
     reload();
   }, [link.station]);
 
-  const call = async (fn, okMessage) => {
-    try {
-      const result = await fn();
-      if (okMessage) toast.ok(typeof okMessage === 'function' ? okMessage(result) : okMessage);
-      return result;
-    } catch (err) {
-      toast.error(err.message);
-      throw err;
-    }
-  };
+  const call = caller(toast);
+  const commands = useCommands(call);
+
+  /* A manufacturer sign-in that came back through the loopback lands on this
+   * page with ?code&state in the address (see cloud.loopback_redirect on the
+   * server).  Finish it once, on load: hand the whole address to the server,
+   * which matches it to the sign-in it started and caches the token, then
+   * scrub the query so a reload does not resubmit a code that is already
+   * spent.  Nothing is pasted; the redirect did it. */
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (!params.get('state') || !(params.get('code') || params.get('error'))) return;
+    const redirected = window.location.href;
+    window.history.replaceState(null, '', window.location.pathname + window.location.hash);
+    call(
+      () => api.post('/cloud/login', { action: 'finish', redirected }),
+      (r) => (r.account ? `Signed in to Alfen as ${r.account}.` : 'Signed in to Alfen.')
+    ).then((r) => r && resync());
+  }, []);
 
   /* The dashboard's balancing card and the Charging tab's full editor
    * write the same settings to the same endpoint, so the reply goes into
    * the panel store and both of them move at once. */
   const writeBalancing = async (payload) => {
-    const doc = await call(() => api.post('/lb', payload), 'Load balancing written.');
+    const doc = await call(() => api.post('/lb', payload), 'Load balancing written.', {
+      raise: true,
+    });
     if (doc?.loadbalancing) putPanel('lb', doc);
     reload();
     return doc;
@@ -551,26 +397,37 @@ function App() {
   const loadLogsSince = (since) => loadLogs(since);
 
 
+  const lookForStations = async () => {
+    try {
+      setFleet(await api.get('/stations'));
+    } catch (err) {
+      toast.error(err.message);
+      setFleet({ configured: [], discovered: [] });
+    }
+  };
+
   const pick = async (station) => {
     setPicking(false);
     setDashboard(null);
     setStatus(null);
     setPropertyView(EMPTY_PROPERTIES);  // another charger, another catalog
     resetPanels();                      // ... and another set of panel answers
+    resetDrafts();                      // ... and nothing changed on it yet
     setLogLines([]);
     loadedFor.current = null;
-    await call(() => api.post('/station', station), `Station set to ${station.name || station.host}.`);
+    const doc = await call(
+      () => api.post('/station', station),
+      `Station set to ${station.name || station.host}.`
+    );
+    /* The reply carries the new link, and it is taken rather than waited
+     * for.  The stream sends the same document a moment later, and in that
+     * moment the page still believes no station is chosen -- which is the
+     * one state that replaces the whole body with "No station selected
+     * yet", so a tile clicked on the Fleet flashed that prompt on its way
+     * to the dashboard. */
+    if (doc?.link) setLink(doc.link);
     reload();
-  };
-
-  /* Show a tab: build it if this is its first time, and put it in the
-   * address bar so a reload comes back to it. */
-  const show = (id) => {
-    setTab(id);
-    setSeen((known) => (known.has(id) ? known : new Set([...known, id])));
-    if (window.location.hash.replace(/^#/, '') !== id) {
-      window.history.replaceState(null, '', `#${id}`);
-    }
+    return doc;
   };
 
   /* The log is read the first time it is looked at, and not before: it is
@@ -583,133 +440,143 @@ function App() {
     if (logLines.length === 0 && !logLoading) loadLogs();
   }, [tab, link.station]);
 
-
-  /* Arrow keys walk the tab strip, as a tablist is expected to. */
-  const onTabKey = (event, index) => {
-    const step = { ArrowLeft: -1, ArrowRight: 1 }[event.key];
-    const at =
-      event.key === 'Home'
-        ? 0
-        : event.key === 'End'
-          ? TABS.length - 1
-          : step
-            ? (index + step + TABS.length) % TABS.length
-            : null;
-    if (at === null) return;
-    event.preventDefault();
-    show(TABS[at][0]);
-    document.getElementById(`tab-${TABS[at][0]}`)?.focus();
-  };
+  /* The same, for the Fleet: an mDNS sweep is worth doing when somebody
+   * asks what there is, and not before. */
+  useEffect(() => {
+    if (tab === 'fleet' && fleet === null) lookForStations();
+  }, [tab]);
 
 
-  const reboot = () => call(() => api.post('/actions/reboot'), (r) => r.message);
-  const syncClock = () => call(() => api.post('/actions/time-sync'), 'Charger clock set.');
-  const uploadLogo = (file) =>
-    call(() => api.upload('/actions/logo', file), 'Logo upload started.');
-  const uploadFirmware = (file) =>
-    call(() => api.upload('/actions/firmware', file), 'Firmware upload started.');
-  const listFirmware = (all) =>
-    api.get('/firmware/available', all ? { all: '1' } : {});
-  const installRelease = (name) =>
-    call(() => api.post('/actions/firmware-release', { name }), `Installing ${name}.`);
-  const sendConsole = (command) =>
-    call(() => api.post('/console', { command }), (r) => r.message);
-  const listConsole = () => api.get('/console');
-  const calibrateTilt = () => call(() => api.post('/tilt'), (r) => r.message);
-  const eraseTarget = (target) =>
-    call(() => api.post('/erase', { target }), (r) => r.message);
+  /* One tab's content, by name.  Built once per tab, the first time it is
+   * opened; what it returns then stays mounted behind `hidden`.
+   *
+   * A table rather than the chain of `if (id === ...)` this was: nine
+   * branches returning nine templates, in which the two long ones buried
+   * the seven that are one line, and a tab added to `TABS` without a
+   * branch here fell through to whichever one the chain happened to end
+   * on.  A key that is not here now renders nothing, loudly.
+   */
+  const panels = {
+    /* Choosing a station on the Fleet opens it, the way clicking a board on
+     * the other program's Bank opens that board.  A tile is not a setting:
+     * somebody clicking one has picked the charger they want to look at,
+     * and leaving them on a grid of tiles with one of them newly outlined
+     * makes them go and find the tab themselves.  Only when the server took
+     * it -- a station that could not be set leaves the page where it is,
+     * beside the list another can be chosen from. */
+    fleet: () => html`<${Fleet}
+      stations=${fleet}
+      current=${link.station}
+      busy=${busy}
+      onPick=${async (station) => {
+        if (isCurrent(station, link.station)) {
+          nav.show('dashboard');
+          return;
+        }
+        const doc = await pick({ name: station.name, host: station.host, port: station.port });
+        if (doc) nav.show('dashboard');
+      }}
+      onRescan=${() => {
+        setFleet(null);
+        lookForStations();
+      }}
+      onAdd=${() => setPicking(true)}
+    />`,
 
-  /* One tab's content.  Called once per tab, the first time it is opened;
-   * what it returns then stays mounted behind `hidden`. */
-  const panel = (id) => {
-    if (id === 'dashboard') {
-      return html`<${Dashboard}
-        data=${dashboard}
-        status=${status}
-        station=${link.station}
-        activity=${activity}
-        liveUpdates=${link.live}
-        readOnly=${readOnly}
-        busy=${busy}
-        onReload=${reload}
+    dashboard: () => html`<${Dashboard}
+      data=${dashboard}
+      status=${status}
+      station=${link.station}
+      activity=${activity}
+      liveUpdates=${link.live}
+      readOnly=${readOnly}
+      busy=${busy}
+      onReload=${reload}
+      onDoctor=${() => call(() => api.get('/doctor'))}
+      onSync=${() =>
+        call(
+          () => api.post('/actions/time-sync'),
+          'Charger clock set from this computer.'
+        ).then(reload)}
+      onLicense=${(key) =>
+        call(() => api.post('/actions/license', { key }), (r) => r.message).then(reload)}
+      cloudSignedIn=${!!state?.cloudSignedIn}
+      onCloudSignInStart=${() =>
+        api.post('/cloud/login', { action: 'start', origin: window.location.origin })}
+      onCloudSignInFinish=${(redirected) =>
+        call(
+          () => api.post('/cloud/login', { action: 'finish', redirected }),
+          (r) => (r.account ? `Signed in to Alfen as ${r.account}.` : 'Signed in to Alfen.')
+        ).then((r) => {
+          if (r) resync();
+          return r;
+        })}
+      onCloudSignOut=${() =>
+        call(
+          () => api.post('/cloud/login', { action: 'logout' }),
+          'Signed out of Alfen.'
+        ).then((r) => {
+          if (r) resync();
+          return r;
+        })}
+      onCloudLookup=${(token) =>
+        call(
+          () => api.post('/cloud', token ? { token } : {}),
+          'Fetched from the manufacturer.'
+        )}
+      onControls=${(changes) =>
+        call(() => api.post('/actions/controls', changes), 'Charger settings written.', {
+          raise: true,
+        }).then(reload)}
+      onBalancing=${writeBalancing}
+    />`,
 
-        onDoctor=${() => api.get('/doctor')}
-        onSync=${() =>
-          call(() => api.post('/actions/time-sync'), 'Charger clock set from this computer.').then(reload)}
-        onLicense=${(key) =>
-          call(() => api.post('/actions/license', { key }), (r) => r.message).then(reload)}
-        onControls=${(changes) =>
-          call(() => api.post('/actions/controls', changes), 'Charger settings written.').then(
-            reload
-          )}
-        onBalancing=${writeBalancing}
-      />`;
+    charging: () => html`<${Charging} api=${api} readOnly=${readOnly} busy=${busy} toast=${toast} />`,
 
-    }
-    if (id === 'properties') {
-      return html`<${Properties}
-        state=${propertyView}
-        onState=${setPropertyView}
-        readOnly=${readOnly}
-        busy=${busy}
-        toast=${toast}
-        api=${api}
-        onCategories=${() => api.get('/categories').then((doc) => doc.categories)}
-        onLoad=${(category) =>
-          api.get('/properties', category ? { category } : {}).then((doc) => doc.properties)}
-        onWrite=${(writes) => api.post('/properties', { writes }).then((doc) => doc.properties)}
-        link=${link}
-      />`;
+    sessions: () => html`<${Sessions} api=${api} busy=${busy} link=${link} />`,
 
-    }
-    if (id === 'charging') {
-      return html`<${Charging} api=${api} readOnly=${readOnly} busy=${busy} toast=${toast} />`;
-    }
-    if (id === 'access') {
-      return html`<${Access} api=${api} readOnly=${readOnly} busy=${busy} toast=${toast} />`;
-    }
-    if (id === 'network') {
-      return html`<${Network} api=${api} readOnly=${readOnly} busy=${busy} toast=${toast} />`;
-    }
-    if (id === 'backoffice') {
-      return html`<${Backoffice} api=${api} readOnly=${readOnly} busy=${busy} toast=${toast} />`;
-    }
-    if (id === 'sessions') {
-      return html`<${Sessions} api=${api} busy=${busy} link=${link} />`;
+    logs: () => html`<${Logs}
+      lines=${logLines}
+      follow=${state.followLogs}
+      busy=${busy}
+      loading=${logLoading}
+      onFollow=${setFollow}
+      onReload=${() => loadLogs()}
+      onSince=${loadLogsSince}
+      link=${link}
+    />`,
 
-    }
-    if (id === 'logs') {
-      return html`<${Logs}
-        lines=${logLines}
-        follow=${state.followLogs}
-        busy=${busy}
-        loading=${logLoading}
-        onFollow=${setFollow}
-        onReload=${() => loadLogs()}
-        onSince=${loadLogsSince}
+    access: () => html`<${Access} api=${api} readOnly=${readOnly} busy=${busy} toast=${toast} />`,
 
-        link=${link}
-      />`;
-    }
+    connectivity: () =>
+      html`<${Connectivity} api=${api} readOnly=${readOnly} busy=${busy} toast=${toast} />`,
 
-    return html`<${Actions}
+    backoffice: () =>
+      html`<${Backoffice} api=${api} readOnly=${readOnly} busy=${busy} toast=${toast} />`,
+
+    properties: () => html`<${Properties}
+      state=${propertyView}
+      onState=${setPropertyView}
+      readOnly=${readOnly}
+      busy=${busy}
+      toast=${toast}
+      api=${api}
+      onCategories=${() => api.get('/categories').then((doc) => doc.categories)}
+      onLoad=${(category) =>
+        api.get('/properties', category ? { category } : {}).then((doc) => doc.properties)}
+      onWrite=${(writes) => api.post('/properties', { writes }).then((doc) => doc.properties)}
+      link=${link}
+    />`,
+
+    actions: () => html`<${Actions}
+      key=${link.station}
       jobs=${jobs}
-
       display=${dashboard?.display}
       readOnly=${readOnly}
       busy=${busy}
-      onReboot=${reboot}
-      onTimeSync=${syncClock}
-      onLogo=${uploadLogo}
-      onFirmware=${uploadFirmware}
-      onFirmwareList=${listFirmware}
-      onFirmwareRelease=${installRelease}
-      onTilt=${calibrateTilt}
-      onConsole=${sendConsole}
-      onConsoleList=${listConsole}
-      onErase=${eraseTarget}
+      ...${commands}
       toast=${toast}
-    />`;
+    />`,
   };
 
   /* Every tab that has been opened, all of them mounted, all but one of
@@ -718,61 +585,45 @@ function App() {
    * putting it back costs the charger another round trip for an answer
    * nothing has changed. */
   const panes = () => {
-    if (!state) return html`<div class="empty">Connecting to the alfenctl server...</div>`;
-    if (!state.hasTarget && !link.station) {
+    if (!state) return html`<div class="empty">Connecting to the ${NAME} server...</div>`;
+    /* Nothing chosen yet.  The Fleet tab is the answer to that, so the
+     * page says which tab rather than growing a second way to choose --
+     * a page that offers the same choice in two places is a page where
+     * neither of them is where you look for it. */
+    if (!state.hasTarget && !link.station && tab !== 'fleet') {
       return html`<div class="empty">
         No station selected yet.
-        <div class="actions-row centred">
-          <button class="btn primary" onClick=${() => setPicking(true)}>Choose a station</button>
+        <div class="actions centred">
+          <button class="btn primary" onClick=${() => nav.show('fleet')}>Choose a station</button>
         </div>
       </div>`;
     }
     return TABS.filter(([id]) => seen.has(id)).map(
-      ([id]) => html`<div
-        class="pane"
-        key=${id}
-        id=${`pane-${id}`}
-        role="tabpanel"
-        aria-labelledby=${`tab-${id}`}
-        hidden=${tab !== id}
-      >
-        ${panel(id)}
-      </div>`
+      ([id]) => html`<${Pane} key=${id} id=${id} shown=${tab === id}>${panels[id]?.()}<//>`
     );
   };
 
   return html`<div class="app">
 
-    <header class=${`top${server.state === 'offline' ? ' gone' : server.state === 'reconnecting' ? ' lost' : ''}`}>
-      <div class="brand">
-        <a
-          class="home"
-          href="https://github.com/pbasista/alfenctl"
-          target="_blank"
-          rel="noreferrer"
-          title="alfenctl on GitHub"
-        >
-          <span class="bolt">⚡</span><span class="name">alfenctl</span>
-        </a>
-        ${state?.version
-          ? html`<a
-              class="ver"
-              href="https://github.com/pbasista/alfenctl/releases"
-              target="_blank"
-              rel="noreferrer"
-              title="release notes"
-            >${state.version}</a>`
-          : null}
-      </div>
-      <div class="station-id">
-        <span class="primary">${(info && (info.identity || info.objectId)) || link.station || 'no station'}</span>
-        <span class="secondary">
-          ${info ? `${info.model || ''} ${info.firmware || ''}`.trim() : 'not connected'}
-        </span>
-      </div>
-      <button class="btn small ghost" onClick=${() => setPicking(true)}>change</button>
+    <${Header} state=${server.state} nav=${nav} label="What to look at">
+      <${Brand}><${Glyph} mark=${MARK} /><//>
+      <!-- The station's name is itself the way to change station.  What
+           opened the list used to be a "change" button beside the name,
+           which is a second control for an action about the thing next to
+           it -- and the name is what somebody reads to realise they are
+           looking at the wrong charger. -->
+      <${DeviceId}
+        primary=${(info && (info.identity || info.objectId)) || link.station || 'no station'}
+        secondary=${info ? `${info.model || ''} ${info.firmware || ''}`.trim() : 'not connected'}
+        onPick=${() => setPicking(true)}
+        title="Which charging station"
+      />
       <span class="spacer"></span>
-      <${OfflineNotice} state=${server.state} onRetry=${resync} />
+      <!-- Every edit not sent yet, on whichever tab and card it was made,
+           where it can always be seen and sent or dropped all at once.
+           Each card also applies or discards its own from its title. -->
+      <${PageApply} />
+      <${OfflineNotice} state=${server.state} onRetry=${resync} program=${NAME} />
       ${readOnly && html`<span class="badge">read-only</span>`}
       <${ConnectionPill}
         link=${link}
@@ -792,80 +643,25 @@ function App() {
            working is a switch you miss.  The pill holds a minimum width
            of its own now as well, so most of those changes move
            nothing at all. -->
-      <${LiveToggle} link=${link} offline=${server.offline} onLive=${setLive} />
+      <${LiveToggle}
+        link=${link}
+        offline=${server.offline}
+        onLive=${setLive}
+        program=${NAME}
+      />
       <${Bell} alerts=${alerts} toast=${toast} />
 
-      <button
-        class="btn small ghost icon"
-        title=${`theme: ${theme.mode} -- click for ${theme.next}`}
-        aria-label=${`theme: ${theme.mode}`}
-        onClick=${theme.cycle}
-      >
-        ${THEME_ICON[theme.mode]}
-      </button>
-    </header>
+      <${ThemeToggle} theme=${theme} />
+    <//>
 
     <div class="body">
-
-      <nav class="tabs" role="tablist" aria-label="What to look at">
-        ${TABS.map(
-          ([id, label], index) => html`<button
-            key=${id}
-            id=${`tab-${id}`}
-            role="tab"
-            type="button"
-            aria-selected=${tab === id}
-            aria-controls=${`pane-${id}`}
-            tabIndex=${tab === id ? 0 : -1}
-            onKeyDown=${(event) => onTabKey(event, index)}
-            onClick=${() => show(id)}
-          >
-            ${label}
-          </button>`
-        )}
-      </nav>
       <main>${panes()}</main>
-
-
-      <footer class="license">
-        <!-- The EU flag, drawn inline to the official geometry (same as
-             Wikimedia's own SVG of it): 12 upright five-pointed gold stars
-             each with a circumscribed radius of 1/18 of the flag height
-             (30 of 540), on a circle of radius 1/3 of the flag height
-             (180, same as Wikimedia's own SVG of the flag), on a 3:2 flag of the official blue.  The viewBox is
-             810x540, so the whole rectangle is the flag.  The frame and
-             halo are set in CSS so they follow the theme. -->
-        <svg class="eu-flag" viewBox="0 0 810 540" width="30" height="20" aria-hidden="true">
-          <defs>
-            <path id="eu-star" fill="#ffcc00" d="M0.00,-33.33L7.48,-10.30L31.70,-10.30L12.11,3.93L19.59,26.97L0.00,12.73L-19.59,26.97L-12.11,3.93L-31.70,-10.30L-7.48,-10.30Z" />
-          </defs>
-          <rect x="0" y="0" width="810" height="540" fill="#003399" />
-          <use href="#eu-star" x="405" y="90" />
-          <use href="#eu-star" x="495" y="114.1" />
-          <use href="#eu-star" x="560.9" y="180" />
-          <use href="#eu-star" x="585" y="270" />
-          <use href="#eu-star" x="560.9" y="360" />
-          <use href="#eu-star" x="495" y="425.9" />
-          <use href="#eu-star" x="405" y="450" />
-          <use href="#eu-star" x="315" y="425.9" />
-          <use href="#eu-star" x="249.1" y="360" />
-          <use href="#eu-star" x="225" y="270" />
-          <use href="#eu-star" x="249.1" y="180" />
-          <use href="#eu-star" x="315" y="114.1" />
-        </svg>
-        <a
-          href="https://github.com/pbasista/alfenctl/blob/main/LICENSE"
-          target="_blank"
-          rel="noreferrer"
-          title="The licence this copy of alfenctl is under"
-        >
-          Licensed under the EUPL-1.2
-        </a>
-      </footer>
+      <${License} />
     </div>
 
     ${picking && html`<${StationPicker} onPick=${pick} onClose=${() => setPicking(false)} toast=${toast} />`}
     ${watching && html`<${Watchers} me=${me} onClose=${() => setWatching(false)} toast=${toast} />`}
+    <${DraftDialog} />
     <${Toasts} toasts=${toast.toasts} dismiss=${toast.dismiss} />
   </div>`;
 }

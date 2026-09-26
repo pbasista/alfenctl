@@ -11,13 +11,18 @@ Nothing here writes, and nothing here is fatal: a charger that does not
 carry a register simply produces no finding from it.  A check that raises
 is reported as a check that could not run, because a silent gap in a report
 called ``doctor`` is worse than an untidy line in it.
+
+The *shape* of the answer -- a weight, an area, a detail, and the command
+that would deal with it -- is :mod:`devicectl.doctor`'s, shared with every
+other program of this kind.  What is checked is entirely alfenctl's.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from datetime import timedelta
+
+from devicectl.doctor import ERROR, NOTE, SEVERITY_ORDER, WARNING, Finding, Report
 
 from alfenctl import (
     authorization,
@@ -39,49 +44,6 @@ UNCOMMISSIONED_IDENTITY = "AL1000"
 # The app resyncs a charger it finds this far out; below it, the difference
 # is round-trip noise rather than a clock nobody has set.
 CLOCK_DRIFT_LIMIT = timedelta(minutes=2)
-
-ERROR = "error"
-WARNING = "warning"
-NOTE = "note"
-
-# Worst first, so a report reads top-down.
-SEVERITY_ORDER = {ERROR: 0, WARNING: 1, NOTE: 2}
-
-
-@dataclass(frozen=True)
-class Finding:
-    """One thing worth telling somebody about this charger."""
-
-    severity: str
-    area: str
-    detail: str
-    fix: str | None = None
-    """The alfenctl command that would deal with it, when there is one."""
-
-
-@dataclass
-class Report:
-    """Everything one pass found, and everything it could not look at."""
-
-    findings: list[Finding] = field(default_factory=list)
-    unavailable: list[str] = field(default_factory=list)
-    """Areas whose check could not run, with why."""
-
-    @property
-    def worst(self) -> str | None:
-        """The highest severity present, or None on a clean report."""
-        if not self.findings:
-            return None
-        return min(
-            (f.severity for f in self.findings),
-            key=lambda name: SEVERITY_ORDER.get(name, 9),
-        )
-
-    def sorted(self) -> list[Finding]:
-        """Return the findings, worst first, then by area."""
-        return sorted(
-            self.findings, key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.area)
-        )
 
 
 def _identity(charger: AlfenCharger, out: Report) -> None:
@@ -257,6 +219,19 @@ __all__ = [
     "ERROR",
     "NOTE",
     "UNCOMMISSIONED_IDENTITY",
+    "WARNING",
+    "Finding",
+    "Report",
+    "run",
+]
+
+
+# Re-exported so a caller reads one module rather than two: what a finding is
+# comes from `devicectl.doctor`, what alfenctl checks comes from here.
+__all__ = [
+    "ERROR",
+    "NOTE",
+    "SEVERITY_ORDER",
     "WARNING",
     "Finding",
     "Report",

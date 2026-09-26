@@ -10,15 +10,16 @@ import argparse
 import json
 import sys
 from datetime import datetime
-from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+from devicectl.cli.command import Command
+from devicectl.progress import end_live, write_live
 
 from alfenctl import master_tag, whitelist
 from alfenctl.charger import AlfenCharger
-from alfenctl.progress import end_live, write_live
-from alfenctl.cli.command import Command
 from alfenctl.cli.exits import EXIT_ERROR, EXIT_OK
-from alfenctl.cli.output import confirm
+from alfenctl.cli.output import aborted, confirm, print_json, read_in
+from alfenctl.errors import AlfenError
 
 
 def _read_whitelist(
@@ -53,67 +54,69 @@ def _print_tags(tags: list[whitelist.Tag]) -> None:
     print(f"\n{len(tags)} tag(s).")
 
 
-def cmd_tags(charger: AlfenCharger, args: argparse.Namespace) -> int:
-    """Read and edit the charger's local RFID whitelist."""
+def _cmd_tags_list(charger: AlfenCharger, args: argparse.Namespace) -> int:
+    """Show every tag on the charger (``tags list``)."""
     import csv
     import io
 
-    action = args.action
-    if action == "list":
-        tags = _read_whitelist(charger, args)
-        if args.json:
-            print(json.dumps([whitelist.tag_dict(t) for t in tags], indent=2))
-        elif args.csv:
-            buf = io.StringIO()
-            writer = csv.writer(buf)
-            writer.writerow(whitelist.TAG_COLUMNS)
-            writer.writerows(whitelist.tag_row(t) for t in tags)
-            sys.stdout.write(buf.getvalue())
-        else:
-            _print_tags(tags)
-        return EXIT_OK
+    tags = _read_whitelist(charger, args)
+    if args.json:
+        print_json([whitelist.tag_dict(t) for t in tags])
+    elif args.csv:
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(whitelist.TAG_COLUMNS)
+        writer.writerows(whitelist.tag_row(t) for t in tags)
+        sys.stdout.write(buf.getvalue())
+    else:
+        _print_tags(tags)
+    return EXIT_OK
 
-    if action == "add":
-        expires = _tag_expiry(args)
-        if expires is EXPIRY_INVALID:
-            return EXIT_ERROR
-        status = whitelist.STATUS_CODES.get(args.status, whitelist.STATUS_ACTIVE)
-        for tag in args.tags:
-            whitelist.upsert(
-                charger, tag, parent=args.parent, status=status, expires=expires
-            )
-        print(f"Wrote {len(args.tags)} tag(s).")
-        return EXIT_OK
 
-    if action == "remove":
-        for tag in args.tags:
-            whitelist.remove(charger, tag)
-        print(f"Removed {len(args.tags)} tag(s).")
-        return EXIT_OK
-
-    if action == "clear":
-        info = charger.basic_info()
-        if not args.yes:
-            if not confirm(f"Remove every tag from the whitelist on {info.object_id}?"):
-                print("Aborted.", file=sys.stderr)
-                return EXIT_ERROR
-        whitelist.clear(charger)
-        print("Whitelist cleared.")
-        return EXIT_OK
-
-    if action == "learn":
-        whitelist.start_add_mode(charger)
-        print(
-            "The charger will add the next tag presented at its reader.\n"
-            "Hold the card to the reader now, then re-read with "
-            "'alfenctl tags list'."
+def _cmd_tags_add(charger: AlfenCharger, args: argparse.Namespace) -> int:
+    """Add or update tags (``tags add``)."""
+    expires = _tag_expiry(args)
+    if expires is EXPIRY_INVALID:
+        return EXIT_ERROR
+    status = whitelist.STATUS_CODES.get(args.status, whitelist.STATUS_ACTIVE)
+    for tag in args.tags:
+        whitelist.upsert(
+            charger, tag, parent=args.parent, status=status, expires=expires
         )
-        return EXIT_OK
+    print(f"Wrote {len(args.tags)} tag(s).")
+    return EXIT_OK
 
-    if action == "master":
-        return _cmd_tags_master(charger, args)
 
-    return _import_tags(charger, args)
+def _cmd_tags_remove(charger: AlfenCharger, args: argparse.Namespace) -> int:
+    """Remove tags by id (``tags remove``)."""
+    for tag in args.tags:
+        whitelist.remove(charger, tag)
+    print(f"Removed {len(args.tags)} tag(s).")
+    return EXIT_OK
+
+
+def _cmd_tags_clear(charger: AlfenCharger, args: argparse.Namespace) -> int:
+    """Remove every tag (``tags clear``)."""
+    info = charger.basic_info()
+    if not args.yes and not confirm(
+        f"Remove every tag from the whitelist on {info.object_id}?"
+    ):
+        aborted()
+        return EXIT_ERROR
+    whitelist.clear(charger)
+    print("Whitelist cleared.")
+    return EXIT_OK
+
+
+def _cmd_tags_learn(charger: AlfenCharger, args: argparse.Namespace) -> int:
+    """Put the reader into add mode for the next card (``tags learn``)."""
+    whitelist.start_add_mode(charger)
+    print(
+        "The charger will add the next tag presented at its reader.\n"
+        "Hold the card to the reader now, then re-read with "
+        "'alfenctl tags list'."
+    )
+    return EXIT_OK
 
 
 def _cmd_tags_master(charger: AlfenCharger, args: argparse.Namespace) -> int:
@@ -159,16 +162,33 @@ def _tag_expiry(args: argparse.Namespace) -> Any:
         return EXPIRY_INVALID
 
 
+def _read_tag_file(path: str) -> list[whitelist.Tag]:
+    """Read a tag file, in whichever of the two formats it is written in."""
+    try:
+        wanted = whitelist.parse_tag_file(read_in(path))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise AlfenError(f"cannot read {path}: {exc}") from None
+    if not wanted:
+        raise AlfenError(f"no tags in {path}")
+    return wanted
+
+
+def _preview_tag_changes(
+    writes: list[whitelist.Tag],
+    removals: list[whitelist.Tag],
+    current: list[whitelist.Tag],
+) -> None:
+    """Print what the file would do, a line per tag, before anything is written."""
+    for tag in writes:
+        verb = "add" if all(t.tag != tag.tag for t in current) else "update"
+        print(f"  {verb:6s} {tag.tag}  {tag.status_name}  {tag.expiry_text}")
+    for tag in removals:
+        print(f"  remove {tag.tag}")
+
+
 def _import_tags(charger: AlfenCharger, args: argparse.Namespace) -> int:
     """Apply a tag file to the charger, with a preview (``tags import``)."""
-    try:
-        wanted = whitelist.parse_tag_file(Path(args.file).read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        print(f"error: cannot read {args.file}: {exc}", file=sys.stderr)
-        return EXIT_ERROR
-    if not wanted:
-        print(f"error: no tags in {args.file}", file=sys.stderr)
-        return EXIT_ERROR
+    wanted = _read_tag_file(args.file)
     current = _read_whitelist(charger, args)
     writes, removals = whitelist.diff(current, wanted)
     if not args.replace:
@@ -176,18 +196,14 @@ def _import_tags(charger: AlfenCharger, args: argparse.Namespace) -> int:
     if not writes and not removals:
         print("Nothing to change; the charger already matches the file.")
         return EXIT_OK
-    for tag in writes:
-        verb = "add" if all(t.tag != tag.tag for t in current) else "update"
-        print(f"  {verb:6s} {tag.tag}  {tag.status_name}  {tag.expiry_text}")
-    for tag in removals:
-        print(f"  remove {tag.tag}")
+    _preview_tag_changes(writes, removals, current)
     if args.dry_run:
         print("\nDry run; nothing written.")
         return EXIT_OK
-    if not args.yes:
-        if not confirm(f"\nApply {len(writes) + len(removals)} change(s)?"):
-            print("Aborted.", file=sys.stderr)
-            return EXIT_ERROR
+    total = len(writes) + len(removals)
+    if not args.yes and not confirm(f"\nApply {total} change(s)?"):
+        aborted()
+        return EXIT_ERROR
     for tag in writes:
         whitelist.upsert(
             charger,
@@ -198,8 +214,26 @@ def _import_tags(charger: AlfenCharger, args: argparse.Namespace) -> int:
         )
     for tag in removals:
         whitelist.remove(charger, tag.tag)
-    print(f"Applied {len(writes) + len(removals)} change(s).")
+    print(f"Applied {total} change(s).")
     return EXIT_OK
+
+
+# (action) -> what it runs.  `import` is not here: it is the fallback, so
+# that `tags FILE` with no action named still reaches it.
+_ACTIONS: dict[str, Callable[[AlfenCharger, argparse.Namespace], int]] = {
+    "list": _cmd_tags_list,
+    "add": _cmd_tags_add,
+    "remove": _cmd_tags_remove,
+    "clear": _cmd_tags_clear,
+    "learn": _cmd_tags_learn,
+    "master": _cmd_tags_master,
+}
+
+
+def cmd_tags(charger: AlfenCharger, args: argparse.Namespace) -> int:
+    """Read and edit the charger's local RFID whitelist."""
+    run = _ACTIONS.get(args.action, _import_tags)
+    return run(charger, args)
 
 
 def add_parsers(
@@ -245,7 +279,7 @@ def add_parsers(
         help="apply a tag file (JSON, CSV, or one id a line)",
         parents=[common],
     )
-    tp.add_argument("file", help="file to apply")
+    tp.add_argument("file", help="file to apply ('-' for stdin)")
     tp.add_argument(
         "--replace",
         action="store_true",
@@ -274,6 +308,6 @@ def add_parsers(
 
 
 COMMANDS: dict[str, Command] = {
-    "tags": Command(cmd_tags),
-    "whitelist": Command(cmd_tags),
+    "tags": Command(cmd_tags, default_action="list", fans_out=("list",)),
+    "whitelist": Command(cmd_tags, default_action="list", fans_out=("list",)),
 }

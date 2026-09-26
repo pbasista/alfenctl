@@ -18,9 +18,10 @@
  * carries a "purpose unknown" badge instead of a name nobody has.
  */
 
-import { html, useEffect, useMemo, useState } from '../vendor/preact-htm.module.js';
+import { offerWriter, useDraft } from '/core/js/drafts.js';
+import { Card, DASH, Progress, Select } from '/core/js/ui.js';
+import { html, useEffect, useMemo, useState } from '/core/vendor/preact-htm.module.js';
 import { BackupBar } from './backup.js';
-import { Card, DASH, Progress, Select } from './ui.js';
 
 
 /* What a row says when neither the vendor's catalog nor this program's own
@@ -34,18 +35,30 @@ const UNDESCRIBED = "purpose unknown";
  * eye, short enough that a second read is obviously a second read. */
 const FLASH_MS = 4000;
 
-function Editor({ prop, onSave, onCancel, busy }) {
-  const [value, setValue] = useState(prop.value === null ? '' : String(prop.value));
-  const save = () => onSave(prop.id, value);
+/* The draft these rows edit.  A property changed is one edit among the
+ * page's others: the card's title and the header say it is waiting, and
+ * either sends it -- where each row used to have a Save of its own, the
+ * one editor on either page that wrote a field the moment it was left. */
+const PROPERTIES = 'properties';
+
+function asText(value) {
+  return value === null || value === undefined ? '' : String(value);
+}
+
+function Editor({ prop, draft, onCancel }) {
+  const value = draft.get(prop.id, asText(prop.value));
+  /* Typed back to what the charger holds is not an edit. */
+  const setValue = (next) =>
+    next === asText(prop.value) ? draft.drop(prop.id) : draft.set(prop.id, next);
   const onKey = (event) => {
-    if (event.key === 'Enter') save();
     if (event.key === 'Escape') onCancel();
   };
-  return html`<div class="actions-row">
+  return html`<div class="actions">
     ${prop.options?.length
       ? html`<${Select}
           value=${value}
-          onChange=${(e) => setValue(e.target.value)}
+          pending=${draft.has(prop.id)}
+          onChange=${setValue}
           onKeyDown=${onKey}
           entries=${prop.options.map((option) => ({
             value: String(option.value),
@@ -57,11 +70,13 @@ function Editor({ prop, onSave, onCancel, busy }) {
           autofocus
           value=${value}
           maxlength=${prop.length || undefined}
+          class=${draft.has(prop.id) ? 'pending' : ''}
           onInput=${(e) => setValue(e.target.value)}
           onKeyDown=${onKey}
         />`}
-    <button class="btn small primary" disabled=${busy} onClick=${save}>Save</button>
-    <button class="btn small ghost" onClick=${onCancel}>Cancel</button>
+    <button class="btn small ghost" onClick=${onCancel}>
+      ${draft.has(prop.id) ? 'Discard' : 'Close'}
+    </button>
   </div>`;
 }
 
@@ -84,12 +99,18 @@ function isNumeric(prop) {
  * replacing stays on screen above it, which is what you are changing it
  * from.  It is the shape the sessions table already opens a summary row
  * with. */
-function PropRow({ prop, busy, readOnly, editing, fresh, onEdit, onSave, onCancel }) {
+function PropRow({ prop, draft, readOnly, editing, fresh, onEdit, onCancel }) {
   const heading = prop.title || (prop.known ? prop.name : '');
   const under = [prop.known && prop.name !== heading ? prop.name : '', prop.id]
     .filter(Boolean)
     .join('  ·  ');
-  return html`<tr class=${`${fresh ? 'arrived' : ''}${editing ? ' editing' : ''}`}>
+  const held = draft.has(prop.id);
+  const open = editing || held;
+  return html`<tr
+    class=${[fresh ? 'arrived' : '', open ? 'editing' : '', held ? 'pending' : '']
+      .filter(Boolean)
+      .join(' ')}
+  >
     <td class="name">
       ${heading
         ? html`<div class="prop-name">${heading}</div>`
@@ -112,15 +133,15 @@ function PropRow({ prop, busy, readOnly, editing, fresh, onEdit, onSave, onCance
     <td class="right">
       ${prop.writable
         ? !readOnly &&
-          !editing &&
+          !open &&
           html`<button class="btn small ghost" onClick=${onEdit}>Edit</button>`
         : html`<span class="badge ro">ro</span>`}
     </td>
   </tr>
-  ${editing &&
-  html`<tr class="editor">
+  ${open &&
+  html`<tr class=${held ? 'editor pending' : 'editor'}>
     <td colspan="4">
-      <${Editor} prop=${prop} busy=${busy} onSave=${onSave} onCancel=${onCancel} />
+      <${Editor} prop=${prop} draft=${draft} onCancel=${onCancel} />
     </td>
   </tr>`}`;
 }
@@ -158,6 +179,7 @@ export function Properties({
 }) {
 
   const { categories, properties, category, filter, writableOnly, namedOnly } = state;
+  const draft = useDraft(PROPERTIES);
   const [editing, setEditing] = useState(null);
   const [loading, setLoading] = useState(false);
   /* Which rows the last read brought in.  Local rather than in `state`:
@@ -220,21 +242,28 @@ export function Properties({
     }
   };
 
-  const save = async (id, value) => {
-    try {
-      const updated = await onWrite([{ id, value }]);
-      onState((current) => ({
-        ...current,
-        properties: (current.properties || []).map(
-          (p) => updated.find((u) => u.id === p.id) || p
-        ),
-      }));
-      setEditing(null);
-      toast.ok(`${id} written.`);
-    } catch (err) {
-      toast.error(err.message);
-    }
-  };
+  offerWriter(PROPERTIES, {
+    title: 'Properties',
+    busy,
+    disabled: readOnly,
+    write: async (edits) => {
+      const writes = Object.entries(edits).map(([id, value]) => ({ id, value }));
+      try {
+        const updated = await onWrite(writes);
+        onState((current) => ({
+          ...current,
+          properties: (current.properties || []).map(
+            (p) => updated.find((u) => u.id === p.id) || p
+          ),
+        }));
+        setEditing(null);
+        toast.ok(writes.length === 1 ? `${writes[0].id} written.` : `${writes.length} properties written.`);
+      } catch (err) {
+        toast.error(err.message);
+        throw err;
+      }
+    },
+  });
 
   const shown = useMemo(() => {
     const needle = filter.trim().toLowerCase();
@@ -258,7 +287,7 @@ export function Properties({
     <div class="toolbar">
       <${Select}
         value=${category}
-        onChange=${(e) => patch({ category: e.target.value })}
+        onChange=${(value) => patch({ category: value })}
         entries=${[
           { value: 'all', title: 'every category (slow)' },
           /* The chosen category stands in the list until the real one
@@ -295,7 +324,7 @@ export function Properties({
          a tab whose whole point is the list that is not there yet.  A card
          that says so is the list, empty. -->
     ${properties === null
-      ? html`<${Card} title="Properties">
+      ? html`<${Card} title="Properties" draft=${draft}>
           <div class="empty">
             Nothing read from this charger yet -- pick a category above and
             read it.<br />
@@ -306,7 +335,7 @@ export function Properties({
           </div>
         <//>`
       : shown.length === 0
-        ? html`<${Card} title="Properties">
+        ? html`<${Card} title="Properties" draft=${draft}>
             <div class="empty">
               Nothing matches. ${properties.length} propert${properties.length === 1
                 ? 'y is'
@@ -314,7 +343,7 @@ export function Properties({
               ${' '}read; the filters above are hiding all of them.
             </div>
           <//>`
-        : html`<div>
+        : html`<${Card} title="Properties" draft=${draft}>
             <div class="muted small count">
               ${shown.length} of ${properties.length} properties${unnamed
                 ? ` -- ${unnamed} of them of unknown purpose`
@@ -335,19 +364,21 @@ export function Properties({
                     (prop) => html`<${PropRow}
                       key=${prop.id}
                       prop=${prop}
-                      busy=${busy}
+                      draft=${draft}
                       readOnly=${readOnly}
                       editing=${editing === prop.id}
                       fresh=${Boolean(arrived?.has(prop.id))}
                       onEdit=${() => setEditing(prop.id)}
-                      onSave=${save}
-                      onCancel=${() => setEditing(null)}
+                      onCancel=${() => {
+                        draft.drop(prop.id);
+                        setEditing(null);
+                      }}
                     />`
                   )}
                 </tbody>
               </table>
             </div>
-          </div>`}
+          <//>`}
     <${BackupBar} api=${api} readOnly=${readOnly} busy=${busy} toast=${toast} link=${link} />
 
   </div>`;

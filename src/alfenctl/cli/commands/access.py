@@ -2,56 +2,27 @@
 
 ``password recover`` is the odd one out in the whole program -- it runs
 without logging in, because the point of it is that the password is not
-known.  See :class:`alfenctl.cli.command.Need`.
+known.  See :class:`devicectl.cli.command.Need`.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
-import re
 import sys
 
 import httpx
+from devicectl.cli.command import Command, Need
 
 from alfenctl import secret
+from alfenctl.access import (
+    DEFAULT_TEMP_PASSWORD_HOURS,
+    PIN_RE,
+    recovery_error,
+)
 from alfenctl.charger import AlfenCharger
-from alfenctl.cli.command import Command, Need
 from alfenctl.cli.exits import EXIT_ERROR, EXIT_OK
-from alfenctl.cli.output import print_table
-
-# DlgEndUserPin's own validation, mirrored client-side.
-PIN_RE = re.compile(r"^[0-9]{4,6}$")
-
-# Default lifetime of a temporary password; the app's dialog offers 1..72 hours.
-DEFAULT_TEMP_PASSWORD_HOURS = 24
-
-# HTTP statuses the recovery endpoint answers with (ICULanDevice.ResetPassword).
-HTTP_FORBIDDEN = 403
-
-HTTP_TOO_MANY_REQUESTS = 429
-
-HTTP_SERVICE_UNAVAILABLE = 503
-
-SECONDS_PER_MINUTE = 60
-
-
-def _recovery_error(exc: httpx.HTTPStatusError) -> str:
-    """Turn the charger's refusal of a reset code into the app's wording."""
-    status = exc.response.status_code
-    if status == HTTP_FORBIDDEN:
-        return "the password reset code is incorrect."
-    if status == HTTP_TOO_MANY_REQUESTS:
-        try:
-            body = json.loads(exc.response.text.replace('{"version":1,', "{"))
-            left = float(body.get("lockout_remaining_seconds", 0))
-        except (ValueError, TypeError):
-            left = 0
-        wait = f" for {left / SECONDS_PER_MINUTE:.1f} minutes" if left > 0 else ""
-        return f"locked out{wait} after too many incorrect reset attempts."
-    if status == HTTP_SERVICE_UNAVAILABLE:
-        return "password recovery is not available on this charging station."
-    return f"the charger refused the reset code (HTTP {status})."
+from alfenctl.cli.output import error, print_table
+from alfenctl.errors import AlfenError
 
 
 def cmd_password(charger: AlfenCharger, args: argparse.Namespace) -> int:
@@ -62,7 +33,7 @@ def cmd_password(charger: AlfenCharger, args: argparse.Namespace) -> int:
         try:
             charger.reset_password(args.code)
         except httpx.HTTPStatusError as exc:
-            print(f"error: {_recovery_error(exc)}", file=sys.stderr)
+            error(recovery_error(exc))
             return EXIT_ERROR
         print(
             "The password has been reset to the charger's default.\n"
@@ -81,16 +52,14 @@ def cmd_password(charger: AlfenCharger, args: argparse.Namespace) -> int:
             return EXIT_OK
         pin = args.pin or getpass.getpass("New PIN (4-6 digits): ")
         if not PIN_RE.match(pin):
-            print("error: the PIN must be 4 to 6 digits", file=sys.stderr)
-            return EXIT_ERROR
+            raise AlfenError("the PIN must be 4 to 6 digits")
         charger.set_end_user_pin(pin)
         print("Eve Connect app access PIN set.")
         return EXIT_OK
 
     new_password = args.password or getpass.getpass("New password: ")
     if not new_password:
-        print("error: empty password", file=sys.stderr)
-        return EXIT_ERROR
+        raise AlfenError("empty password")
     if args.action == "temporary":
         charger.set_temporary_password(new_password, args.hours)
         print(
@@ -239,6 +208,8 @@ def add_parsers(
 
 
 COMMANDS: dict[str, Command] = {
-    "password": Command(cmd_password, per_action={"recover": Need.CONNECTION}),
-    "secret": Command(cmd_secret, per_action={"list": Need.NOTHING}),
+    "password": Command(cmd_password, per_action={"recover": Need.LINK}),
+    "secret": Command(
+        cmd_secret, per_action={"list": Need.NOTHING}, default_action="list"
+    ),
 }

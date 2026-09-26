@@ -1,4 +1,11 @@
-"""How the charger is on the network: Wi-Fi, Ethernet and the modem.
+"""Where the charger is reachable: Wi-Fi, Ethernet and the modem.
+
+Called connectivity rather than network because this tool has four other
+things it could mean.  A charger belongs to a *Smart Charging Network*
+(:mod:`alfenctl.scn`); its radio can see Wi-Fi *networks*; its modem picks a
+cellular *network*; and it is found by browsing the local *network*.  Only one
+of the five is what this module reads, so it is the one that gives the word
+up.
 
 ``alfenctl wifi`` could already scan for networks and could not join one,
 which is the gap this closes.  Joining is three registers written together --
@@ -40,7 +47,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from alfenctl.charger import AlfenCharger, LiveProperty
+from devicectl import fields
+from devicectl.fields import FieldSpec
+
+from alfenctl.charger import AlfenCharger
 from alfenctl.eds import INTEGER8, UNSIGNED8, UNSIGNED32, VISIBLE_STRING
 from alfenctl.errors import AlfenError
 
@@ -75,34 +85,6 @@ P_ICCID = (0x2105, 0)  # 8453 gprsSIMiccid
 P_APN = (0x2100, 0)  # 8448 gprsAPNname
 P_NETWORK_MODE = (0x2113, 0)  # 8467 automatic or manual
 P_NETWORK_TECHNOLOGY = (0x2114, 0)  # 8468 2G/3G/4G
-
-ALL_KEYS = (
-    P_WIFI_ENABLED,
-    P_WIFI_SSID,
-    P_WIFI_SECURITY,
-    P_WIFI_RSSI,
-    P_WIFI_STATUS,
-    P_WIFI_HARDWARE,
-    P_WIFI_AP_ENABLED,
-    P_WIFI_AP_START,
-    P_WIFI_STATION_STATUS,
-    P_WIFI_AP_STATUS,
-    P_WIFI_ADDRESS,
-    P_MAC,
-    P_WIRED_ADDRESS,
-    P_WIRED_FIXED,
-    P_WIRED_NETMASK,
-    P_WIRED_GATEWAY,
-    P_WIRED_DNS1,
-    P_WIRED_DNS2,
-    P_MOBILE_ADDRESS,
-    P_SIGNAL_STRENGTH,
-    P_IMSI,
-    P_ICCID,
-    P_APN,
-    P_NETWORK_MODE,
-    P_NETWORK_TECHNOLOGY,
-)
 
 # WifiSecurityType.  The bundled EDS lists exactly these ten and settles a
 # disagreement between the two reverse-engineered apps about the last one:
@@ -170,12 +152,263 @@ UNSET_ADDRESS = "192.168.000.092"
 ENABLED_TYPE = UNSIGNED8
 
 
-class NetworkError(AlfenError, ValueError):
+def _address(value: str) -> str:
+    """Show an address, marking the factory default for what it is."""
+    return f"{value} (unset)" if value.strip() == UNSET_ADDRESS else value
+
+
+def _wifi_row(value: Any, _state: Connectivity) -> str:
+    """Render the radio's enable flag, distinguishing "off" from "did not say".
+
+    A charger that did not answer for the flag is not a charger whose Wi-Fi is
+    off; saying "disabled" for both is how an unanswered read gets mistaken
+    for a setting.
+    """
+    if value is None:
+        return "not reported"
+    return "enabled" if value else "disabled"
+
+
+def _wired_row(value: Any, state: Connectivity) -> str | None:
+    """Render the Ethernet address with how the charger came by it."""
+    if not value:
+        return None
+    return f"{value} ({'static' if state.wired_fixed else 'DHCP'})"
+
+
+def _address_row(value: Any, _state: Connectivity) -> str | None:
+    """Render an interface address, or nothing when there is none."""
+    return None if not value else _address(str(value))
+
+
+def _modem_row(value: Any, _state: Connectivity) -> str:
+    """Render the modem's address, which prints even when it has none."""
+    return _address(str(value)) if value else "-"
+
+
+# --- the settings ------------------------------------------------------------------------
+# Three tables, because the terminal prints three sections and a station that
+# has no radio should not be told its radio is off.  :func:`read` and the web
+# document walk all three; :meth:`Connectivity.rows` walks each behind its own
+# gate.
+#
+# Everything here is read-only.  Joining a network is three registers written
+# together with a password that never reads back, and writing an interface's
+# address over that same interface is how a charger is lost -- so those are
+# :func:`connect`, :func:`enable` and ``alfenctl set``, not flags on a table.
+WIRED_FIELDS: tuple[FieldSpec, ...] = (
+    FieldSpec(
+        name="mac",
+        kind=fields.TEXT,
+        address=P_MAC,
+        label="Ethernet MAC",
+        json="mac",
+        access=fields.READ_ONLY,
+    ),
+    FieldSpec(
+        name="wired_address",
+        kind=fields.TEXT,
+        address=P_WIRED_ADDRESS,
+        label="Ethernet address",
+        json="wiredAddress",
+        access=fields.READ_ONLY,
+        render=_wired_row,
+    ),
+    FieldSpec(
+        name="wired_fixed",
+        kind=fields.FLAG,
+        address=P_WIRED_FIXED,
+        json="wiredFixed",
+        access=fields.READ_ONLY,
+    ),
+)
+
+WIFI_FIELDS: tuple[FieldSpec, ...] = (
+    FieldSpec(
+        name="wifi_enabled",
+        kind=fields.FLAG,
+        address=P_WIFI_ENABLED,
+        label="Wi-Fi",
+        json="wifiEnabled",
+        access=fields.READ_ONLY,
+        render=_wifi_row,
+    ),
+    FieldSpec(
+        name="wifi_status",
+        kind=fields.ENUM,
+        address=P_WIFI_STATUS,
+        label="  radio",
+        json="wifiStatus",
+        options=WIFI_STATUSES,
+        access=fields.READ_ONLY,
+    ),
+    FieldSpec(
+        name="wifi_ssid",
+        kind=fields.TEXT,
+        address=P_WIFI_SSID,
+        label="  network",
+        json="wifiSsid",
+        access=fields.READ_ONLY,
+    ),
+    FieldSpec(
+        name="wifi_security",
+        kind=fields.ENUM,
+        address=P_WIFI_SECURITY,
+        label="  security",
+        json="wifiSecurity",
+        options=SECURITY_TYPES,
+        access=fields.READ_ONLY,
+    ),
+    FieldSpec(
+        name="wifi_station_status",
+        kind=fields.ENUM,
+        address=P_WIFI_STATION_STATUS,
+        label="  station",
+        json="wifiStationStatus",
+        options=STATION_STATUSES,
+        access=fields.READ_ONLY,
+    ),
+    FieldSpec(
+        name="wifi_address",
+        kind=fields.TEXT,
+        address=P_WIFI_ADDRESS,
+        label="  address",
+        json="wifiAddress",
+        access=fields.READ_ONLY,
+        render=_address_row,
+    ),
+    FieldSpec(
+        name="wifi_rssi",
+        kind=fields.INTEGER,
+        address=P_WIFI_RSSI,
+        label="  signal",
+        json="wifiRssi",
+        unit="dBm",
+        access=fields.READ_ONLY,
+    ),
+    FieldSpec(
+        name="wifi_ap_status",
+        kind=fields.ENUM,
+        address=P_WIFI_AP_STATUS,
+        label="  access point",
+        json="wifiApStatus",
+        options=AP_STATUSES,
+        access=fields.READ_ONLY,
+    ),
+    FieldSpec(
+        name="wifi_hardware",
+        kind=fields.FLAG,
+        address=P_WIFI_HARDWARE,
+        access=fields.READ_ONLY,
+    ),
+    FieldSpec(
+        name="wifi_ap_enabled",
+        kind=fields.FLAG,
+        address=P_WIFI_AP_ENABLED,
+        json="wifiApEnabled",
+        access=fields.READ_ONLY,
+    ),
+    FieldSpec(
+        name="wifi_ap_start",
+        kind=fields.FLAG,
+        address=P_WIFI_AP_START,
+        access=fields.READ_ONLY,
+    ),
+)
+
+MODEM_FIELDS: tuple[FieldSpec, ...] = (
+    FieldSpec(
+        name="mobile_address",
+        kind=fields.TEXT,
+        address=P_MOBILE_ADDRESS,
+        label="Modem address",
+        json="mobileAddress",
+        access=fields.READ_ONLY,
+        render=_modem_row,
+    ),
+    FieldSpec(
+        name="apn",
+        kind=fields.TEXT,
+        address=P_APN,
+        label="  APN",
+        json="apn",
+        access=fields.READ_ONLY,
+    ),
+    FieldSpec(
+        name="imsi",
+        kind=fields.TEXT,
+        address=P_IMSI,
+        label="  IMSI",
+        json="imsi",
+        access=fields.READ_ONLY,
+    ),
+    FieldSpec(
+        name="iccid",
+        kind=fields.TEXT,
+        address=P_ICCID,
+        label="  ICCID",
+        json="iccid",
+        access=fields.READ_ONLY,
+    ),
+    FieldSpec(
+        name="signal_strength",
+        kind=fields.INTEGER,
+        address=P_SIGNAL_STRENGTH,
+        label="  signal",
+        json="signalStrength",
+        unit="dBm",
+        access=fields.READ_ONLY,
+    ),
+    FieldSpec(
+        name="network_mode",
+        kind=fields.ENUM,
+        address=P_NETWORK_MODE,
+        label="  mode",
+        json="networkMode",
+        options=NETWORK_MODES,
+        access=fields.READ_ONLY,
+    ),
+    FieldSpec(
+        name="network_technology",
+        kind=fields.ENUM,
+        address=P_NETWORK_TECHNOLOGY,
+        label="  technology",
+        json="networkTechnology",
+        options=NETWORK_TECHNOLOGIES,
+        access=fields.READ_ONLY,
+    ),
+)
+
+FIELDS: tuple[FieldSpec, ...] = (*WIRED_FIELDS, *WIFI_FIELDS, *MODEM_FIELDS)
+
+# The four Ethernet settings that travel as one block: the charger keeps them
+# in four registers and this reports them as one mapping, because a netmask
+# without its gateway is not a thing anybody asks for.
+WIRED_BLOCK = {
+    "netmask": P_WIRED_NETMASK,
+    "gateway": P_WIRED_GATEWAY,
+    "dns1": P_WIRED_DNS1,
+    "dns2": P_WIRED_DNS2,
+}
+WIRED_BLOCK_LABELS = (
+    ("Ethernet netmask", "netmask"),
+    ("Ethernet gateway", "gateway"),
+    ("Ethernet DNS", "dns1"),
+    ("Ethernet DNS 2", "dns2"),
+)
+
+ALL_KEYS = (
+    *(spec.address for spec in FIELDS if spec.address is not None),
+    *WIRED_BLOCK.values(),
+)
+
+
+class ConnectivityError(AlfenError, ValueError):
     """A network setting the charger could not sensibly be given."""
 
 
 @dataclass
-class Network:
+class Connectivity:
     """Where this charger is on the network, per interface."""
 
     wifi_enabled: bool | None = None
@@ -231,166 +464,51 @@ class Network:
         return None
 
     def rows(self) -> list[tuple[str, str]]:
-        """Return the label/value pairs worth printing, skipping what is absent."""
-        out: list[tuple[str, str]] = []
-        if self.mac:
-            out.append(("Ethernet MAC", self.mac))
-        if self.wired_address:
-            how = "static" if self.wired_fixed else "DHCP"
-            out.append(("Ethernet address", f"{self.wired_address} ({how})"))
-        for label, key in (
-            ("Ethernet netmask", "netmask"),
-            ("Ethernet gateway", "gateway"),
-            ("Ethernet DNS", "dns1"),
-            ("Ethernet DNS 2", "dns2"),
-        ):
+        """Return the label/value pairs worth printing, skipping what is absent.
+
+        Three sections, each behind its own gate: a station with no radio is
+        not told its radio is off, and a station with no modem is not given a
+        modem row saying it has no address.
+        """
+        out = fields.rows(WIRED_FIELDS, self)
+        for label, key in WIRED_BLOCK_LABELS:
             if self.wired.get(key):
                 out.append((label, self.wired[key]))
         if self.has_wifi:
-            # A charger that did not answer for the enable flag is not a
-            # charger whose Wi-Fi is off; saying "disabled" for both is how
-            # an unanswered read gets mistaken for a setting.
-            out.append(
-                (
-                    "Wi-Fi",
-                    "not reported"
-                    if self.wifi_enabled is None
-                    else ("enabled" if self.wifi_enabled else "disabled"),
-                )
-            )
-            if self.wifi_status is not None:
-                out.append(("  radio", _label(WIFI_STATUSES, self.wifi_status)))
-            if self.wifi_ssid:
-                out.append(("  network", self.wifi_ssid))
-            if self.wifi_security is not None:
-                out.append(("  security", _label(SECURITY_TYPES, self.wifi_security)))
-            if self.wifi_station_status is not None:
-                out.append(
-                    ("  station", _label(STATION_STATUSES, self.wifi_station_status))
-                )
-            if self.wifi_address:
-                out.append(("  address", _address(self.wifi_address)))
-            if self.wifi_rssi:
-                out.append(("  signal", f"{self.wifi_rssi} dBm"))
-            if self.wifi_ap_status is not None:
-                out.append(("  access point", _label(AP_STATUSES, self.wifi_ap_status)))
+            out.extend(fields.rows(WIFI_FIELDS, self))
         if self.mobile_address or self.imsi or self.apn:
-            out.append(
-                (
-                    "Modem address",
-                    _address(self.mobile_address) if self.mobile_address else "-",
-                )
-            )
-            for label, value in (
-                ("  APN", self.apn),
-                ("  IMSI", self.imsi),
-                ("  ICCID", self.iccid),
-            ):
-                if value:
-                    out.append((label, value))
-            if self.signal_strength is not None:
-                out.append(("  signal", f"{self.signal_strength} dBm"))
-            if self.network_mode is not None:
-                out.append(("  mode", _label(NETWORK_MODES, self.network_mode)))
-            if self.network_technology is not None:
-                out.append(
-                    (
-                        "  technology",
-                        _label(NETWORK_TECHNOLOGIES, self.network_technology),
-                    )
-                )
+            out.extend(fields.rows(MODEM_FIELDS, self))
         return out
 
 
-def _address(value: str) -> str:
-    """Show an address, marking the factory default for what it is."""
-    return f"{value} (unset)" if value.strip() == UNSET_ADDRESS else value
-
-
-def _label(table: dict[int, str], code: int) -> str:
-    """Look up a code, keeping the raw number when the table lacks it."""
-    return table.get(code, f"unknown ({code})")
-
-
-def _int(live: dict[tuple[int, int], LiveProperty], key: tuple[int, int]) -> int | None:
-    """Read a property as an integer, or None when absent or not numeric."""
-    prop = live.get(key)
-    if prop is None or prop.value is None:
-        return None
-    try:
-        return int(float(prop.value))
-    except (TypeError, ValueError):
-        return None
-
-
-def _flag(
-    live: dict[tuple[int, int], LiveProperty], key: tuple[int, int]
-) -> bool | None:
-    """Read a property as a boolean, or None when the charger did not answer."""
-    value = _int(live, key)
-    return None if value is None else bool(value)
-
-
-def _text(
-    live: dict[tuple[int, int], LiveProperty], key: tuple[int, int]
-) -> str | None:
-    """Read a property as a non-empty string, or None."""
-    prop = live.get(key)
-    if prop is None or prop.value in (None, ""):
-        return None
-    return str(prop.value)
-
-
-def read(charger: AlfenCharger) -> Network:
+def read(charger: AlfenCharger) -> Connectivity:
     """Read every interface's registers in one ``ids=`` query."""
     live = {lp.key: lp for lp in charger.fetch_properties_by_ids(list(ALL_KEYS))}
-    state = Network(
-        wifi_enabled=_flag(live, P_WIFI_ENABLED),
-        wifi_ssid=_text(live, P_WIFI_SSID),
-        wifi_security=_int(live, P_WIFI_SECURITY),
-        wifi_rssi=_int(live, P_WIFI_RSSI),
-        wifi_status=_int(live, P_WIFI_STATUS),
-        wifi_hardware=_flag(live, P_WIFI_HARDWARE),
-        wifi_station_status=_int(live, P_WIFI_STATION_STATUS),
-        wifi_ap_enabled=_flag(live, P_WIFI_AP_ENABLED),
-        wifi_ap_start=_flag(live, P_WIFI_AP_START),
-        wifi_ap_status=_int(live, P_WIFI_AP_STATUS),
-        wifi_address=_text(live, P_WIFI_ADDRESS),
-        mac=_text(live, P_MAC),
-        wired_address=_text(live, P_WIRED_ADDRESS),
-        wired_fixed=_flag(live, P_WIRED_FIXED),
-        mobile_address=_text(live, P_MOBILE_ADDRESS),
-        signal_strength=_int(live, P_SIGNAL_STRENGTH),
-        imsi=_text(live, P_IMSI),
-        iccid=_text(live, P_ICCID),
-        apn=_text(live, P_APN),
-        network_mode=_int(live, P_NETWORK_MODE),
-        network_technology=_int(live, P_NETWORK_TECHNOLOGY),
-    )
-    for name, key in (
-        ("netmask", P_WIRED_NETMASK),
-        ("gateway", P_WIRED_GATEWAY),
-        ("dns1", P_WIRED_DNS1),
-        ("dns2", P_WIRED_DNS2),
-    ):
-        value = _text(live, key)
-        if value:
-            state.wired[name] = value
+
+    def answer(key: tuple[int, int]) -> Any:
+        prop = live.get(key)
+        return None if prop is None else prop.value
+
+    state = Connectivity(**fields.harvest(FIELDS, answer))
+    for name, key in WIRED_BLOCK.items():
+        value = answer(key)
+        if value not in (None, ""):
+            state.wired[name] = str(value)
     return state
 
 
 def check_credentials(ssid: str, password: str | None, security: int) -> None:
     """Refuse an SSID or a key the radio cannot be given, before sending it."""
     if not ssid or len(ssid) > MAX_SSID:
-        raise NetworkError(f"an SSID is 1 to {MAX_SSID} characters")
+        raise ConnectivityError(f"an SSID is 1 to {MAX_SSID} characters")
     if security == SECURITY_OPEN:
         if password:
-            raise NetworkError("an open network takes no password")
+            raise ConnectivityError("an open network takes no password")
         return
     if not password:
-        raise NetworkError("this security type needs a password")
+        raise ConnectivityError("this security type needs a password")
     if not MIN_PSK <= len(password) <= MAX_PSK:
-        raise NetworkError(f"a WPA password is {MIN_PSK} to {MAX_PSK} characters")
+        raise ConnectivityError(f"a WPA password is {MIN_PSK} to {MAX_PSK} characters")
 
 
 def connect(
@@ -399,7 +517,7 @@ def connect(
     password: str | None = None,
     *,
     security: int | None = None,
-) -> Network:
+) -> Connectivity:
     """Join a Wi-Fi network: SSID, key and the enable flag in one write.
 
     ``security`` defaults to WPA2-AES when a password was given and to open
@@ -408,7 +526,7 @@ def connect(
     if security is None:
         security = SECURITY_DEFAULT if password else SECURITY_OPEN
     if security not in SECURITY_TYPES:
-        raise NetworkError(f"unknown Wi-Fi security type {security}")
+        raise ConnectivityError(f"unknown Wi-Fi security type {security}")
     check_credentials(ssid, password, security)
     writes: dict[tuple[int, int], tuple[Any, int | None]] = {
         P_WIFI_SSID: (ssid, VISIBLE_STRING),
@@ -421,7 +539,7 @@ def connect(
     return read(charger)
 
 
-def enable(charger: AlfenCharger) -> Network:
+def enable(charger: AlfenCharger) -> Connectivity:
     """Switch the Wi-Fi radio on, leaving the stored network alone.
 
     This is what has to happen before a scan: the radio is the thing doing
@@ -433,7 +551,7 @@ def enable(charger: AlfenCharger) -> Network:
     return read(charger)
 
 
-def disconnect(charger: AlfenCharger) -> Network:
+def disconnect(charger: AlfenCharger) -> Connectivity:
     """Switch the Wi-Fi radio off, leaving the stored network alone."""
     charger.write_properties({P_WIFI_ENABLED: (0, ENABLED_TYPE)})
     return read(charger)
@@ -445,7 +563,7 @@ def wait_for_radio(
     timeout: float | None = None,
     interval: float | None = None,
     sleep: Callable[[float], None] = time.sleep,
-) -> Network:
+) -> Connectivity:
     """Poll ``wifiStatus`` until the radio is running, or the patience runs out.
 
     Returns the last reading either way; the caller decides what an unready
@@ -464,7 +582,7 @@ def wait_for_radio(
 
 def set_access_point(
     charger: AlfenCharger, *, enabled: bool | None = None, start: bool | None = None
-) -> Network:
+) -> Connectivity:
     """Turn the charger's own access point on or off."""
     writes: dict[tuple[int, int], tuple[Any, int | None]] = {}
     if enabled is not None:
@@ -478,8 +596,8 @@ def set_access_point(
 
 __all__ = [
     "ALL_KEYS",
-    "Network",
-    "NetworkError",
+    "Connectivity",
+    "ConnectivityError",
     "SECURITY_TYPES",
     "connect",
     "disconnect",

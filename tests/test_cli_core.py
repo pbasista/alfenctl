@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from conftest import (
     STATION,
     FakeCharger,
@@ -14,13 +13,34 @@ from conftest import (
 )
 
 from alfenctl import cli
+from alfenctl.cli.parser import insert_default_command
 from alfenctl.discovery import Station
 from alfenctl.eds import load_catalog
 
 
-def test_no_command_prints_help(capsys) -> None:
-    assert cli.main([]) == cli.EXIT_ERROR
-    assert "usage:" in capsys.readouterr().out
+def test_no_command_serves_the_ui() -> None:
+    # `alfenctl` on its own is `alfenctl ui`: the web interface is what this
+    # program mostly is, and a page of usage text is not what somebody who
+    # typed the bare name came for.  Tested on the argv rewrite rather than
+    # through main(), which would bind a socket.
+    assert insert_default_command([]) == ["ui"]
+
+
+def test_options_with_no_command_are_handed_to_the_ui() -> None:
+    assert insert_default_command(["--station", "garage"]) == [
+        "ui",
+        "--station",
+        "garage",
+    ]
+
+
+def test_help_and_version_still_reach_the_root_parser() -> None:
+    for word in ("-h", "--help", "--version"):
+        assert insert_default_command([word]) == [word]
+
+
+def test_a_named_command_is_left_alone() -> None:
+    assert insert_default_command(["status", "--json"]) == ["status", "--json"]
 
 
 def test_list_mode_prints_stations(capsys, monkeypatch) -> None:

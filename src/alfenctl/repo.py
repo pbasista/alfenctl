@@ -30,9 +30,15 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Iterator
+
+from devicectl.progress import (
+    BYTES_PER_MB,
+)
+from devicectl.report import SILENT, Reporter
 
 from alfenctl.charger import ChargerInfo
+from alfenctl.config import RepoConfig, default_cache_dir
 from alfenctl.errors import AlfenError
 from alfenctl.firmware import (
     BUNDLE_EXTENSION,
@@ -45,27 +51,14 @@ from alfenctl.firmware import (
     product_code,
     product_matches_model,
 )
-from alfenctl.progress import (
-    BYTES_PER_MB,
-    bar,
-    end_live,
-    fmt_duration,
-    write_live,
-)
 
 # --- The server ---------------------------------------------------------------------------
 
-# Straight from ICUServiceInstaller.AppProperties: the site, the shared
-# installer account, and the folder the firmware images live in. The app ships
-# these in plain sight in its binary; they are not per-customer credentials.
-DEFAULT_SITE = "ftp.alfen.com"
-DEFAULT_PORT = 21
-DEFAULT_USERNAME = "installer"
-DEFAULT_PASSWORD = "jIf978FQmk1W"  # noqa: S105 - published in the app's binary
-DEFAULT_DIRECTORY = "Firmware"
-# The app allows itself 2 s (AppProperties.FTPCommunicationTimeout); that is
-# tight for a listing over the open internet, so we are more patient.
-DEFAULT_TIMEOUT_S = 20.0
+# Where to fetch from, and the account to do it with, are settings rather
+# than protocol: :class:`alfenctl.config.RepoConfig` holds them, beside the
+# rest of what alfen.toml can say.  These two are this module's own -- how it
+# reads a file once it has one.
+
 # Reading a ~2 MB image over FTP takes a while; give the transfer its own,
 # longer timeout.
 DOWNLOAD_TIMEOUT_S = 120.0
@@ -75,36 +68,6 @@ DOWNLOAD_BLOCK_SIZE = 32768
 
 class RepositoryError(AlfenError):
     """The firmware server could not be reached, or answered unusably."""
-
-
-@dataclass
-class RepoConfig:
-    """Where to fetch firmware from; overridable via ``[firmware]`` in alfen.toml."""
-
-    site: str = DEFAULT_SITE
-    port: int = DEFAULT_PORT
-    username: str = DEFAULT_USERNAME
-    password: str = DEFAULT_PASSWORD
-    directory: str = DEFAULT_DIRECTORY
-    timeout: float = DEFAULT_TIMEOUT_S
-
-    @property
-    def location(self) -> str:
-        """Return a human-readable "host/directory" for messages."""
-        return f"{self.site}/{self.directory}".rstrip("/")
-
-
-def default_cache_dir() -> Path:
-    """Return where downloaded images are kept between runs.
-
-    ``$XDG_CACHE_HOME/alfen/firmware``, falling back to
-    ``~/.cache/alfen/firmware`` -- the counterpart of the app's
-    ``%APPDATA%/ACE Service Installer/Firmware`` mirror, except that we fill
-    it lazily with what was actually asked for.
-    """
-    xdg = os.environ.get("XDG_CACHE_HOME")
-    base = Path(xdg).expanduser() if xdg else Path.home() / ".cache"
-    return base / "alfen" / "firmware"
 
 
 # --- Listing ------------------------------------------------------------------------------
@@ -397,87 +360,66 @@ def _extract_image(bundle: Path, family: str) -> Path:
     return target
 
 
-def _report(name: str, done: int, total: int | None, started: float) -> None:
-    """Draw one line of download progress (a bar when the total size is known)."""
-    elapsed = time.monotonic() - started
-    mb = done / BYTES_PER_MB
-    if total:
-        write_live(
-            f"  {name}  [{bar(done / total)}] {done * 100 // total:3d}%  "
-            f"{mb:.1f}/{total / BYTES_PER_MB:.1f} MB  {fmt_duration(elapsed)}"
-        )
-    else:
-        write_live(f"  {name}  {mb:.1f} MB  {fmt_duration(elapsed)}")
-
-
 def download(
     fw: RemoteFirmware,
     family: str,
     *,
     config: RepoConfig | None = None,
     cache_dir: Path | None = None,
-    on_progress: Callable[[int, int | None], None] | None = None,
+    report: Reporter = SILENT,
 ) -> Path:
     """Fetch ``fw`` into the cache and return the path of the image to upload.
 
     A file already in the cache with the expected size is reused. A ``.zip``
     bundle is unpacked and the image inside it is what comes back.
 
-    ``on_progress`` takes ``(bytes so far, total or None)``; a caller that
-    passes one is not a terminal, so nothing is drawn or printed.
+    Nothing is printed: where the progress goes is the caller's to decide,
+    and a terminal and a browser want it in different shapes.  The default
+    reporter discards it, which is what a library caller wants.
     """
     config = config or RepoConfig()
     cache = cache_dir or default_cache_dir()
     cache.mkdir(parents=True, exist_ok=True)
     local = cache / Path(fw.name).name
-    quiet = on_progress is not None
-
-    def say(message: str) -> None:
-        if not quiet:
-            print(message)
 
     if local.is_file() and (fw.size is None or local.stat().st_size == fw.size):
-        say(f"Using the cached copy of {local.name} ({local.parent}).")
-        if on_progress is not None:
-            on_progress(local.stat().st_size, fw.size)
+        report.detail(f"Using the cached copy of {local.name} ({local.parent}).")
+        report.sending(local.stat().st_size, fw.size or 0, 0.0, local.name)
     else:
         size_text = f" ({fw.size / BYTES_PER_MB:.1f} MB)" if fw.size else ""
-        say(f"Downloading {local.name}{size_text} from {config.location}...")
+        report.step(f"Downloading {local.name}{size_text} from {config.location}")
         started = time.monotonic()
         done = 0
         remote_path = f"{config.directory}/{fw.name}" if config.directory else fw.name
         try:
-            with _connect(config, timeout=DOWNLOAD_TIMEOUT_S) as ftp:
-                with local.open("wb") as out:
+            with (
+                _connect(config, timeout=DOWNLOAD_TIMEOUT_S) as ftp,
+                local.open("wb") as out,
+            ):
 
-                    def _chunk(data: bytes) -> None:
-                        nonlocal done
-                        out.write(data)
-                        done += len(data)
-                        if on_progress is not None:
-                            on_progress(done, fw.size)
-                        else:
-                            _report(local.name, done, fw.size, started)
-
-                    ftp.retrbinary(
-                        f"RETR {remote_path}", _chunk, blocksize=DOWNLOAD_BLOCK_SIZE
+                def _chunk(data: bytes) -> None:
+                    nonlocal done
+                    out.write(data)
+                    done += len(data)
+                    report.sending(
+                        done, fw.size or 0, time.monotonic() - started, local.name
                     )
-                if fw.modified is not None:
-                    stamp = fw.modified.timestamp()
-                    os.utime(local, (stamp, stamp))
+
+                ftp.retrbinary(
+                    f"RETR {remote_path}", _chunk, blocksize=DOWNLOAD_BLOCK_SIZE
+                )
+            if fw.modified is not None:
+                stamp = fw.modified.timestamp()
+                os.utime(local, (stamp, stamp))
         except BaseException:
             # Don't leave a half-written image in the cache: with no size to
             # check it against, the next run would happily upload it.
-            if not quiet:
-                end_live()
             local.unlink(missing_ok=True)
             raise
-        if not quiet:
-            end_live()
 
     if fw.is_bundle:
         image = _extract_image(local, family)
-        say(f"Unpacked {image.name} from {local.name}.")
+        report.detail(f"Unpacked {image.name} from {local.name}.")
         return image
     return local
 

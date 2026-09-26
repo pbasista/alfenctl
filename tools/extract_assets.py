@@ -48,7 +48,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from alfenctl.logo import BLOB_FILE, FWU_FIXED_OBJECTS  # noqa: E402
+from alfenctl.logo import BLOB_FILE, FWU_FIXED_OBJECTS
 
 PACKAGE = Path(__file__).resolve().parents[1] / "src" / "alfenctl"
 EDS_FILE = "EDS.xml"

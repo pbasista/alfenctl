@@ -12,9 +12,11 @@ from __future__ import annotations
 import argparse
 import sys
 
+from devicectl import fields
+from devicectl.cli.command import Command
+
 from alfenctl import loadbalancing
 from alfenctl.charger import AlfenCharger
-from alfenctl.cli.command import Command
 from alfenctl.cli.exits import EXIT_OK
 from alfenctl.cli.output import print_rows
 
@@ -23,11 +25,6 @@ def _report_warnings(state: loadbalancing.LoadBalancing) -> None:
     """Print what the charger accepted but will not act on as it looks."""
     for caveat in state.warnings():
         print(f"warning: {caveat}", file=sys.stderr)
-
-
-def _on_off(value: str | None) -> bool | None:
-    """Turn an ``on``/``off`` argument into a flag, leaving None alone."""
-    return None if value is None else value == "on"
 
 
 def cmd_loadbalancing(charger: AlfenCharger, args: argparse.Namespace) -> int:
@@ -43,32 +40,13 @@ def cmd_loadbalancing(charger: AlfenCharger, args: argparse.Namespace) -> int:
         on = args.solar_boost == "on"
         sockets = [args.socket] if args.socket else sorted(loadbalancing.SOLAR_BOOST)
         boost = {number: on for number in sockets}
-    state = loadbalancing.apply(
-        charger,
-        static=_on_off(args.static),
-        active=_on_off(args.active),
-        protocol=args.protocol,
-        data_source=args.data_source,
-        max_meter_current_a=args.max_meter_current,
-        safe_current_a=args.safe_current,
-        max_imbalance_a=args.max_imbalance,
-        phase_rotation=args.phase_rotation,
-        measurement_includes_ev=_on_off(args.includes_ev),
-        phase_switching=_on_off(args.phase_switching),
-        max_allowed_phases=args.max_phases,
-        solar_mode=args.solar_mode,
-        solar_green_share=args.green_share,
-        solar_comfort_w=args.comfort_level,
-        solar_boost=boost or None,
-    )
+    settings = fields.from_namespace(loadbalancing.FIELDS, args)
+    if boost:
+        settings["solar_boost"] = boost
+    state = loadbalancing.apply(charger, settings)
     print_rows("Load balancing", state.rows())
     _report_warnings(state)
     return EXIT_OK
-
-
-def _enum_help(table: dict[int, str]) -> str:
-    """Render an enumeration as ``value (label)`` pairs for a help string."""
-    return ", ".join(f"{value} ({label})" for value, label in sorted(table.items()))
 
 
 def add_parsers(
@@ -88,76 +66,8 @@ def add_parsers(
     lsub = sp.add_subparsers(dest="action", metavar="ACTION", required=True)
     lsub.add_parser("show", help="show the load-balancing settings", parents=[common])
     lc = lsub.add_parser("set", help="change one or more settings", parents=[common])
+    fields.add_arguments(loadbalancing.FIELDS, lc)
     onoff = ("on", "off")
-    lc.add_argument("--static", choices=onoff, help="static load balancing")
-    lc.add_argument("--active", choices=onoff, help="active load balancing")
-    lc.add_argument(
-        "--protocol",
-        type=int,
-        metavar="N",
-        help=f"smart meter protocol: {_enum_help(loadbalancing.PROTOCOLS)}",
-    )
-    lc.add_argument(
-        "--data-source",
-        type=int,
-        metavar="N",
-        help=f"what active balancing follows: {_enum_help(loadbalancing.DATA_SOURCES)}",
-    )
-    lc.add_argument(
-        "--max-meter-current",
-        type=float,
-        metavar="AMPS",
-        help="the grid connection's limit",
-    )
-    lc.add_argument(
-        "--safe-current",
-        type=float,
-        metavar="AMPS",
-        help="what to fall back to when the meter stops answering",
-    )
-    lc.add_argument(
-        "--max-imbalance",
-        type=float,
-        metavar="AMPS",
-        help="allowed imbalance between phases",
-    )
-    lc.add_argument(
-        "--phase-rotation",
-        choices=loadbalancing.PHASE_ROTATIONS,
-        help="how the phases are wired to this station",
-    )
-    lc.add_argument(
-        "--includes-ev",
-        choices=onoff,
-        help="whether the meter's reading already counts the charging car",
-    )
-    lc.add_argument(
-        "--phase-switching", choices=onoff, help="allow 1-/3-phase switching"
-    )
-    lc.add_argument(
-        "--max-phases",
-        type=int,
-        choices=loadbalancing.ALLOWED_PHASES,
-        help="the most phases a session may use",
-    )
-    lc.add_argument(
-        "--solar-mode",
-        type=int,
-        metavar="N",
-        help=f"solar charging: {_enum_help(loadbalancing.SOLAR_MODES)}",
-    )
-    lc.add_argument(
-        "--green-share",
-        type=int,
-        metavar="PERCENT",
-        help="surplus share to charge from",
-    )
-    lc.add_argument(
-        "--comfort-level",
-        type=int,
-        metavar="WATTS",
-        help="the floor comfort mode keeps",
-    )
     lc.add_argument(
         "--solar-boost",
         choices=onoff,
@@ -173,6 +83,8 @@ def add_parsers(
 
 
 COMMANDS: dict[str, Command] = {
-    "loadbalancing": Command(cmd_loadbalancing),
-    "lb": Command(cmd_loadbalancing),
+    "loadbalancing": Command(
+        cmd_loadbalancing, default_action="show", fans_out=("show",)
+    ),
+    "lb": Command(cmd_loadbalancing, default_action="show", fans_out=("show",)),
 }

@@ -7,20 +7,18 @@ meter the firmware does not already know needs its registers described.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
-from pathlib import Path
+from typing import Callable
 
 import httpx
+from devicectl.cli.command import Command
 
 from alfenctl import charging_profiles, meter_map
 from alfenctl.charger import AlfenCharger
-from alfenctl.cli.command import Command
 from alfenctl.cli.exits import EXIT_ERROR, EXIT_OK
-from alfenctl.cli.output import confirm, print_table
-
-# Firmware that does not implement /api/chargingprofiles answers this.
-HTTP_NOT_FOUND = 404
+from alfenctl.cli.output import confirm, print_json, print_table, read_in, write_out
+from alfenctl.errors import AlfenError
+from alfenctl.transport import HTTP_NOT_FOUND
 
 
 def _print_meter_map(regmap: meter_map.RegisterMap) -> None:
@@ -42,9 +40,13 @@ def cmd_meter_map(charger: AlfenCharger, args: argparse.Namespace) -> int:
 
     if args.action == "save":
         text = meter_map.to_json(current, name=f"{charger.station.ip} custom map")
-        Path(args.file).write_text(text + "\n", encoding="utf-8")
-        print(f"Wrote {len(current.entries)} entries to {args.file}")
-        return EXIT_OK
+        return write_out(
+            text + "\n",
+            args.file,
+            default_name=lambda: f"{charger.basic_info().object_id}-meter-map.json",
+            yes=args.yes,
+            summary=f"{len(current.entries)} entries",
+        )
 
     if not current.entries:
         print(
@@ -64,10 +66,9 @@ def cmd_meter_map(charger: AlfenCharger, args: argparse.Namespace) -> int:
 def _apply_meter_map(charger: AlfenCharger, args: argparse.Namespace) -> int:
     """Apply a register map from one of Alfen's JSON files."""
     try:
-        text = Path(args.file).read_text(encoding="utf-8")
+        text = read_in(args.file)
     except OSError as exc:
-        print(f"error: cannot read {args.file}: {exc}", file=sys.stderr)
-        return EXIT_ERROR
+        raise AlfenError(f"cannot read {args.file}: {exc}") from None
     wanted = meter_map.parse_json(text)
     current = meter_map.read(charger)
     return write_meter_map(charger, wanted, current, args)
@@ -98,73 +99,97 @@ def write_meter_map(
     return EXIT_OK
 
 
+def _profiles_install_uk(charger: AlfenCharger, args: argparse.Namespace) -> int:
+    """Install the UK Smart Charging default schedule."""
+    charger.add_charging_profile(charging_profiles.uk_default_profile())
+    print(
+        "UK Smart Charging default profile installed: charging is "
+        "blocked 08:00-11:00 and 16:00-22:00 on weekdays, allowed "
+        "the rest of the time."
+    )
+    return EXIT_OK
+
+
+def _profiles_clear(charger: AlfenCharger, args: argparse.Namespace) -> int:
+    """Remove one profile, or all of them when none was named."""
+    target = (
+        args.profile_id if args.profile_id is not None else charging_profiles.CLEAR_ALL
+    )
+    charger.clear_charging_profile(target)
+    print(f"Cleared charging profile {target}.")
+    return EXIT_OK
+
+
+def _print_profile(profile: charging_profiles.ChargingProfile) -> None:
+    """Print one profile and the periods of its schedule."""
+    print(
+        f"Profile {profile.profile_id}  connector {profile.connector_id}  "
+        f"{profile.kind}  {profile.purpose}  stack {profile.stack_level}  "
+        f"unit {profile.charging_rate_unit}"
+    )
+    if profile.start_schedule:
+        print(f"  starts {profile.start_schedule}")
+    for period in profile.periods:
+        hh, mm = divmod(period.start_period_s // 60, 60)
+        dd, hh = divmod(hh, 24)
+        print(
+            f"  +{dd}d {hh:02d}:{mm:02d}  limit {period.limit_a:g} "
+            f"{profile.charging_rate_unit}"
+        )
+
+
+def _profiles_show(charger: AlfenCharger, args: argparse.Namespace) -> int:
+    """Show one profile's schedule."""
+    body = charger.fetch_charging_profile(args.profile_id).text
+    profiles = charging_profiles.parse_profiles(body)
+    if not profiles:
+        print(f"No charging profile {args.profile_id}.", file=sys.stderr)
+        return EXIT_ERROR
+    if args.json:
+        print_json([p.raw for p in profiles])
+        return EXIT_OK
+    for profile in profiles:
+        _print_profile(profile)
+    return EXIT_OK
+
+
+def _profiles_list(charger: AlfenCharger, args: argparse.Namespace) -> int:
+    """List the ids of the profiles the charger is holding."""
+    ids = charging_profiles.parse_ids(charger.fetch_charging_profile_ids().text)
+    if args.json:
+        print_json(ids)
+        return EXIT_OK
+    if not ids:
+        print("No charging profiles installed.")
+        return EXIT_OK
+    for pid in ids:
+        tag = (
+            " (UK Smart Charging default)"
+            if pid == charging_profiles.UK_SMART_CHARGING_ID
+            else ""
+        )
+        print(f"  {pid}{tag}")
+    print(
+        f"\n{len(ids)} profile(s). Show one with: alfenctl charging-profiles show <id>"
+    )
+    return EXIT_OK
+
+
+_PROFILE_ACTIONS: dict[str, Callable[[AlfenCharger, argparse.Namespace], int]] = {
+    "install-uk": _profiles_install_uk,
+    "clear": _profiles_clear,
+    "show": _profiles_show,
+}
+
+
 def cmd_charging_profiles(charger: AlfenCharger, args: argparse.Namespace) -> int:
     """List, show, clear, or install OCPP smart-charging profiles."""
-    action = args.action
+    run = _PROFILE_ACTIONS.get(args.action, _profiles_list)
     try:
-        if action == "install-uk":
-            charger.add_charging_profile(charging_profiles.uk_default_profile())
-            print(
-                "UK Smart Charging default profile installed: charging is "
-                "blocked 08:00-11:00 and 16:00-22:00 on weekdays, allowed "
-                "the rest of the time."
-            )
-            return EXIT_OK
-        if action == "clear":
-            target = (
-                args.profile_id
-                if args.profile_id is not None
-                else charging_profiles.CLEAR_ALL
-            )
-            charger.clear_charging_profile(target)
-            print(f"Cleared charging profile {target}.")
-            return EXIT_OK
-        if action == "show":
-            body = charger.fetch_charging_profile(args.profile_id).text
-            profiles = charging_profiles.parse_profiles(body)
-            if not profiles:
-                print(f"No charging profile {args.profile_id}.", file=sys.stderr)
-                return EXIT_ERROR
-            if args.json:
-                print(json.dumps([p.raw for p in profiles], indent=2))
-                return EXIT_OK
-            for p in profiles:
-                print(
-                    f"Profile {p.profile_id}  connector {p.connector_id}  "
-                    f"{p.kind}  {p.purpose}  stack {p.stack_level}  "
-                    f"unit {p.charging_rate_unit}"
-                )
-                if p.start_schedule:
-                    print(f"  starts {p.start_schedule}")
-                for period in p.periods:
-                    hh, mm = divmod(period.start_period_s // 60, 60)
-                    dd, hh = divmod(hh, 24)
-                    print(
-                        f"  +{dd}d {hh:02d}:{mm:02d}  limit {period.limit_a:g} "
-                        f"{p.charging_rate_unit}"
-                    )
-            return EXIT_OK
-        # list
-        body = charger.fetch_charging_profile_ids().text
-        ids = charging_profiles.parse_ids(body)
-        if args.json:
-            print(json.dumps(ids))
-            return EXIT_OK
-        if not ids:
-            print("No charging profiles installed.")
-            return EXIT_OK
-        for pid in ids:
-            tag = (
-                " (UK Smart Charging default)"
-                if pid == charging_profiles.UK_SMART_CHARGING_ID
-                else ""
-            )
-            print(f"  {pid}{tag}")
-        print(
-            f"\n{len(ids)} profile(s). Show one with: alfenctl charging-profiles show <id>"
-        )
-        return EXIT_OK
+        return run(charger, args)
     except httpx.HTTPStatusError as exc:
+        # The whole feature is one firmware generation's; an older station
+        # answers 404 to every one of these endpoints rather than to one.
         if exc.response.status_code == HTTP_NOT_FOUND:
             print(
                 "This charger's firmware does not support charging profiles.",
@@ -244,11 +269,23 @@ def add_parsers(
     mm = mmsub.add_parser(
         "save", help="write the charger's map to a JSON file", parents=[common]
     )
-    mm.add_argument("file", help="file to write")
+    mm.add_argument(
+        "file",
+        nargs="?",
+        help="file to write ('-' for stdout; default: <object id>-meter-map.json)",
+    )
+    mm.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="overwrite an existing file without asking",
+    )
     mm = mmsub.add_parser(
         "apply", help="write a map from a JSON file", parents=[common]
     )
-    mm.add_argument("file", help="register-map JSON (Alfen's own preset format)")
+    mm.add_argument(
+        "file", help="register-map JSON, Alfen's own preset format ('-' for stdin)"
+    )
     mm.add_argument(
         "--dry-run", action="store_true", help="preview the map, write nothing"
     )
@@ -320,8 +357,14 @@ def add_parsers(
 
 
 COMMANDS: dict[str, Command] = {
-    "meter-map": Command(cmd_meter_map),
-    "charging-profiles": Command(cmd_charging_profiles),
-    "charging-profile": Command(cmd_charging_profiles),
-    "direct-start": Command(cmd_direct_start),
+    "meter-map": Command(cmd_meter_map, default_action="show", fans_out=("show",)),
+    "charging-profiles": Command(
+        cmd_charging_profiles, default_action="list", fans_out=("list", "show")
+    ),
+    "charging-profile": Command(
+        cmd_charging_profiles, default_action="list", fans_out=("list", "show")
+    ),
+    "direct-start": Command(
+        cmd_direct_start, default_action="show", fans_out=("show",)
+    ),
 }

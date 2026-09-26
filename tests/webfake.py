@@ -13,21 +13,22 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
+
+from devicectl.errors import DeviceError
+from devicectl.web.events import Broadcaster
+from devicectl.web.server import status_of
 
 from alfenctl.charger import ChargerInfo, LiveProperty
 from alfenctl.discovery import Station
 from alfenctl.web import api
-from alfenctl.web.events import Broadcaster
 from alfenctl.web.session import StationWorker, Target
-
 
 STATION = Station(ip="10.0.0.7", port=443, hostname="ALF-ACE0781464.local.")
 INFO = ChargerInfo(
     object_id="ACE0781464",
     identity="garage",
     model="NG910",
-    family="NG9xx",
+    family="NG",
     firmware="6.4.0-4210",
     firmware_version=(6, 4, 0),
     sockets=1,
@@ -134,7 +135,12 @@ class FakeCharger:
     # header, like a real charger's own settings file does.
     station = STATION
 
-    def login(self) -> None:
+    # The credentials a real client keeps, so the code that opens a *second*
+    # connection with them -- `scn.probe_peers` -- has them to pass on.
+    username = "admin"
+    password = "secret"
+
+    def login(self, timeout: float | None = None) -> None:
         self.logged_in += 1
 
     def logout(self) -> None:
@@ -166,8 +172,8 @@ class FakeCharger:
             on_category(1, 1, "everything")
         return _props()
 
-    def write_properties(self, payload) -> None:
-        self.writes.append(dict(payload))
+    def write_properties(self, writes) -> None:
+        self.writes.append(dict(writes))
 
     def fetch_log(self, offset: int = 0, lines=None) -> str:
         return (
@@ -178,9 +184,8 @@ class FakeCharger:
     def reboot(self, is_ahp: bool = False) -> None:
         self.commands.append("reboot")
 
-    def set_datetime(self, is_ahp: bool = False, when=None):
+    def send_clock(self, stamp: str, *, is_ahp: bool = False) -> None:
         self.commands.append("date")
-        return when or datetime.now(timezone.utc)
 
     def firmware_status(self, timeout=None):
         return False, 0
@@ -324,7 +329,14 @@ def make_worker() -> StationWorker:
 
 
 def call(ctx, method, path, body=None, **query):
-    """Run one API handler the way the server would."""
+    """Run one API handler the way the server would.
+
+    Including the funnel: a handler that lets a :class:`DeviceError` out --
+    a value the field table refused, a charger that said no -- is answered by
+    the real server with that error's status and no traceback, so the same
+    thing happens here.  A test can then say ``pytest.raises(ApiError)`` for a
+    refusal without caring which of the two shapes the handler used.
+    """
     route = api.ROUTES[(method, path)]
     request = api.Request(
         method=method,
@@ -332,7 +344,10 @@ def call(ctx, method, path, body=None, **query):
         query={k: str(v) for k, v in query.items()},
         body=json.dumps(body).encode() if body is not None else b"",
     )
-    response = route.handler(ctx, request)
+    try:
+        response = route.handler(ctx, request)
+    except DeviceError as exc:
+        raise api.ApiError(status_of(exc), str(exc)) from exc
     return response.status, json.loads(response.body or b"null")
 
 

@@ -6,10 +6,13 @@ the one connection the charger allows and tells every open page what that
 connection is doing.
 
 * :mod:`alfenctl.web.session` owns the charger and serialises all work,
-* :mod:`alfenctl.web.events` fans state out to the browsers,
 * :mod:`alfenctl.web.api` is the endpoints,
 * :mod:`alfenctl.web.server` is the HTTP transport,
 * ``static/`` is the page itself.
+
+The fan-out to the browsers is :mod:`devicectl.web.events`, and the
+request, reply and routing types the endpoints are written against are
+:mod:`devicectl.web.http`.
 """
 
 from __future__ import annotations

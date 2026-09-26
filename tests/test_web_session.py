@@ -11,10 +11,9 @@ import threading
 import time
 
 import pytest
-
+from devicectl.web.events import Broadcaster
 from webfake import STATION, FakeCharger, wait_for
 
-from alfenctl.web.events import Broadcaster
 from alfenctl.web.session import (
     LINK_BUSY,
     LINK_ERROR,
@@ -24,7 +23,6 @@ from alfenctl.web.session import (
     Target,
     WorkerBusyError,
 )
-
 
 # --- the event bus -----------------------------------------------------------------------
 
@@ -40,7 +38,7 @@ def test_sticky_events_replay_to_a_new_subscriber():
 
 
 def test_a_lagging_subscriber_loses_its_oldest_events_not_the_newest():
-    from alfenctl.web.events import MAX_QUEUED_EVENTS
+    from devicectl.web.events import MAX_QUEUED_EVENTS
 
     events = Broadcaster()
     subscription = events.subscribe()

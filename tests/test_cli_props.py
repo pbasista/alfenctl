@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 
-
 from alfenctl import cli
 
 
@@ -246,6 +245,62 @@ def test_preset_save_writes_the_file(
     assert not fake_charger.writes
 
 
+def test_preset_save_asks_before_overwriting(
+    fake_charger, capsys, monkeypatch, tmp_path
+) -> None:
+    # It used to overwrite whatever was at the path without a word.
+    _presets(monkeypatch, [("ABB B23", "TCPPresets")])
+    out = tmp_path / "preset.xml"
+    out.write_text("mine")
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+    argv = ["preset", "ABB B23", "--save", str(out), "--host", "1.2.3.4"]
+    assert cli.main(argv) == cli.EXIT_ERROR
+    assert out.read_text() == "mine"
+
+    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+    assert cli.main(argv) == cli.EXIT_OK
+    assert out.read_text() == PRESET_XML
+
+    out.write_text("mine")
+    assert cli.main([*argv, "-y"]) == cli.EXIT_OK
+    assert out.read_text() == PRESET_XML
+
+
+def test_meter_map_save_asks_before_overwriting(
+    fake_charger, tmp_path, monkeypatch
+) -> None:
+    fake_charger.docs["/api/prop"]["properties"] += _MAP_PROPS
+    out_file = tmp_path / "map.json"
+    out_file.write_text("mine")
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+    argv = ["meter-map", "save", str(out_file), "--host", "1.2.3.4"]
+    assert cli.main(argv) == cli.EXIT_ERROR
+    assert out_file.read_text() == "mine"
+    assert cli.main([*argv, "-y"]) == cli.EXIT_OK
+    assert json.loads(out_file.read_text())["Regmap"]
+
+
+def test_meter_map_save_to_a_dash_is_standard_output(
+    fake_charger, tmp_path, capsys, monkeypatch
+) -> None:
+    fake_charger.docs["/api/prop"]["properties"] += _MAP_PROPS
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    assert cli.main(["meter-map", "save", "-", "--host", "1.2.3.4"]) == cli.EXIT_OK
+    assert json.loads(capsys.readouterr().out)["Regmap"]
+
+
+def test_import_reads_standard_input_for_a_dash(
+    fake_charger, monkeypatch, capsys
+) -> None:
+    import io
+
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO(json.dumps([{"id": "2062_0", "value": 16.0}]))
+    )
+    assert cli.main(["import", "-", "--host", "1.2.3.4", "-y"]) == cli.EXIT_OK
+    assert fake_charger.writes and fake_charger.writes[0][(0x2062, 0)] == (16.0, 8)
+
+
 def test_export_xml_by_extension(fake_charger, tmp_path, monkeypatch) -> None:
     """A .xml output file selects the app's settings format."""
     out = tmp_path / "backup.xml"
@@ -402,7 +457,8 @@ def test_meter_map_save_writes_json(fake_charger, tmp_path, capsys) -> None:
     assert cli.main(argv) == 0
     doc = json.loads(out_file.read_text())
     assert [e["Key"] for e in doc["Regmap"]] == ["CURRENT_L1", "POWER_REAL_L1"]
-    assert "Wrote 2 entries" in capsys.readouterr().out
+    # On stderr with every other export's: what was written is not the output.
+    assert "Wrote 2 entries" in capsys.readouterr().err
 
 
 def test_meter_map_apply_previews_and_writes(fake_charger, tmp_path, capsys) -> None:

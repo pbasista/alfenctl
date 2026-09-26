@@ -12,8 +12,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any
+from functools import partial
+from typing import Any, Callable
 
+from alfenctl import glossary
 from alfenctl.charger import (
     ACCESS_READ_ONLY,
     LiveProperty,
@@ -23,23 +25,22 @@ from alfenctl.eds import (
     ARRAY_16,
     BOOLEAN,
     BYTEARRAY,
+    INTEGER8,
     INTEGER16,
     INTEGER32,
     INTEGER64,
-    INTEGER8,
-    Option,
-    PropertyDef,
     REAL32,
     REAL64,
     TYPE_NAMES,
+    UNSIGNED8,
     UNSIGNED16,
     UNSIGNED32,
     UNSIGNED64,
-    UNSIGNED8,
     VISIBLE_STRING,
+    Option,
+    PropertyDef,
     type_name,
 )
-from alfenctl import glossary
 from alfenctl.errors import AlfenError
 
 # (type code) -> (inclusive) numeric range, for strict input validation.
@@ -311,6 +312,85 @@ def _resolve_option(prop: Property, raw: str) -> str:
     return raw
 
 
+def _coerce_boolean(prop: Property, raw: Any) -> Any:
+    """Read the charger's 0/1 as any of the words a person types for it."""
+    if isinstance(raw, bool):
+        return raw
+    word = str(raw).strip().lower()
+    if word in _TRUE_WORDS:
+        return True
+    if word in _FALSE_WORDS:
+        return False
+    raise PropertyValueError(prop, f"'{raw}' is not a boolean (true/false)")
+
+
+def _coerce_real(prop: Property, raw: Any) -> Any:
+    """Read a float, accepting the comma a European keyboard puts there."""
+    try:
+        return float(str(raw).strip().replace(",", "."))
+    except ValueError:
+        raise PropertyValueError(prop, f"'{raw}' is not a number") from None
+
+
+def _coerce_integer(bounds: tuple[int, int], prop: Property, raw: Any) -> Any:
+    """Read an integer and hold it to the width its type declares."""
+    lo, hi = bounds
+    text = str(raw).strip()
+    # A u8 is how the EDS spells a flag, so the words that mean a boolean
+    # have to mean one here too.
+    if isinstance(raw, str) and text.lower() in _TRUE_WORDS | _FALSE_WORDS:
+        text = "1" if text.lower() in _TRUE_WORDS else "0"
+    try:
+        number = int(text)
+    except ValueError:
+        raise PropertyValueError(prop, f"'{raw}' is not an integer") from None
+    if not lo <= number <= hi:
+        raise PropertyValueError(prop, f"{number} out of range [{lo}, {hi}]")
+    return number
+
+
+def _coerce_bytearray(prop: Property, raw: Any) -> Any:
+    """Read hex bytes, however the caller chose to separate them."""
+    text = str(raw).replace(",", "").replace(" ", "").strip()
+    if text and len(text) % 2 == 0:
+        try:
+            return bytes.fromhex(text)
+        except ValueError:
+            pass
+    raise PropertyValueError(prop, f"'{raw}' is not a hex byte string (e.g. 0A,FF)")
+
+
+def _coerce_array_16(prop: Property, raw: Any) -> Any:
+    """Read a comma-separated list of hex u16 words."""
+    try:
+        return [int(part, 16) for part in str(raw).split(",") if part.strip()]
+    except ValueError:
+        raise PropertyValueError(
+            prop, f"'{raw}' is not a hex u16 list (e.g. 00FF,1A00)"
+        ) from None
+
+
+def _coerce_string(prop: Property, raw: Any) -> Any:
+    """Pass the text through, refusing more of it than the field holds."""
+    text = str(raw)
+    if prop.length is not None and len(text) > prop.length:
+        raise PropertyValueError(prop, f"value is {len(text)} chars, max {prop.length}")
+    return text
+
+
+# (type code) -> the reader for it.  A type not named here -- an unknown one,
+# or one of the exotic codes the EDS uses twice -- is passed through for the
+# charger to judge, which is what happened before there was a table.
+_COERCERS: dict[int, Callable[[Property, Any], Any]] = {
+    BOOLEAN: _coerce_boolean,
+    BYTEARRAY: _coerce_bytearray,
+    ARRAY_16: _coerce_array_16,
+    **dict.fromkeys(_REAL_TYPES, _coerce_real),
+    **{code: partial(_coerce_integer, span) for code, span in _INT_RANGES.items()},
+    **dict.fromkeys(_STRING_TYPES, _coerce_string),
+}
+
+
 def coerce_input(prop: Property, raw: Any) -> Any:
     """Validate and coerce user input to the property's typed value.
 
@@ -319,68 +399,10 @@ def coerce_input(prop: Property, raw: Any) -> Any:
     message on any mismatch -- unlike the app, which silently coerces bad
     input to 0.
     """
-    data_type = prop.data_type
     if isinstance(raw, str):
         raw = _resolve_option(prop, raw)
-
-    if data_type is None:  # unknown type: pass through, the charger validates
-        return raw
-
-    if data_type == BOOLEAN:
-        if isinstance(raw, bool):
-            return raw
-        word = str(raw).strip().lower()
-        if word in _TRUE_WORDS:
-            return True
-        if word in _FALSE_WORDS:
-            return False
-        raise PropertyValueError(prop, f"'{raw}' is not a boolean (true/false)")
-
-    if data_type in _REAL_TYPES:
-        try:
-            return float(str(raw).strip().replace(",", "."))
-        except ValueError:
-            raise PropertyValueError(prop, f"'{raw}' is not a number") from None
-
-    if data_type in _INT_RANGES:
-        lo, hi = _INT_RANGES[data_type]
-        text = str(raw).strip()
-        if isinstance(raw, str) and text.lower() in _TRUE_WORDS | _FALSE_WORDS:
-            text = "1" if text.lower() in _TRUE_WORDS else "0"
-        try:
-            number = int(text)
-        except ValueError:
-            raise PropertyValueError(prop, f"'{raw}' is not an integer") from None
-        if not lo <= number <= hi:
-            raise PropertyValueError(prop, f"{number} out of range [{lo}, {hi}]")
-        return number
-
-    if data_type == BYTEARRAY:
-        text = str(raw).replace(",", "").replace(" ", "").strip()
-        if text and len(text) % 2 == 0:
-            try:
-                return bytes.fromhex(text)
-            except ValueError:
-                pass
-        raise PropertyValueError(prop, f"'{raw}' is not a hex byte string (e.g. 0A,FF)")
-
-    if data_type == ARRAY_16:
-        try:
-            return [int(part, 16) for part in str(raw).split(",") if part.strip()]
-        except ValueError:
-            raise PropertyValueError(
-                prop, f"'{raw}' is not a hex u16 list (e.g. 00FF,1A00)"
-            )
-
-    if data_type in _STRING_TYPES:
-        text = str(raw)
-        if prop.length is not None and len(text) > prop.length:
-            raise PropertyValueError(
-                prop, f"value is {len(text)} chars, max {prop.length}"
-            )
-        return text
-
-    return raw  # exotic type: pass through, the charger validates
+    read = _COERCERS.get(prop.data_type)
+    return read(prop, raw) if read else raw
 
 
 # --- what the vendor app will not let you type -------------------------------------------

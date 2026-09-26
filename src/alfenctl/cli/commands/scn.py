@@ -9,67 +9,44 @@ write here is reported one by one.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-
 import argparse
 import sys
+from collections.abc import Mapping
 from typing import Any
 
 import httpx
+from devicectl.cli.command import Command
+from devicectl.report import Reporter
 
 from alfenctl import scn
 from alfenctl.charger import AlfenCharger
-from alfenctl.discovery import Station, discover
-from alfenctl.upgrade import DEFAULT_REBOOT_TIMEOUT_S
-
-from alfenctl.cli.command import Command
 from alfenctl.cli.exits import EXIT_ERROR, EXIT_OK
 from alfenctl.cli.output import confirm
 from alfenctl.cli.report import wait_for_reboot
+from alfenctl.discovery import Station
+from alfenctl.upgrade import DEFAULT_REBOOT_TIMEOUT_S
+
+
+class _Warnings(Reporter):
+    """Puts a skipped peer's warning on stderr, where the CLI wants it."""
+
+    def warn(self, message: str) -> None:
+        """Print one warning to stderr."""
+        print(f"warning: {message}", file=sys.stderr)
 
 
 def _scn_probe_peers(
     args: argparse.Namespace, exclude_ip: str, username: str, password: str
 ) -> list[tuple[Station, scn.Peer]]:
-    """Log into every other charger the LAN offers and read its SCN membership.
-
-    A station that does not answer, or rejects these credentials, is
-    skipped with a warning rather than failing the whole command -- it is
-    as likely to be unrelated hardware on the same LAN as it is to be an
-    unreachable member (see the module docstring in :mod:`alfenctl.scn` for
-    why alfenctl, unlike the app, cannot tell those two apart without a
-    login).
-    """
-    found: list[tuple[Station, scn.Peer]] = []
-    for station in discover(args.discover_time):
-        if station.ip == exclude_ip:
-            continue
-        peer = AlfenCharger(station, username, password, debug=args.debug)
-        try:
-            peer.login()
-            membership = scn.read_membership(peer)
-            info = peer.basic_info()
-        except httpx.HTTPError as exc:
-            print(
-                f"warning: could not log into {station.object_id} "
-                f"({station.ip}): {exc}",
-                file=sys.stderr,
-            )
-            continue
-        finally:
-            peer.close()
-        found.append(
-            (
-                station,
-                scn.Peer(
-                    object_id=info.object_id,
-                    identity=info.identity or info.object_id,
-                    own_sockets=info.sockets or 1,
-                    membership=membership,
-                ),
-            )
-        )
-    return found
+    """Read every other LAN charger's SCN membership, reporting to stderr."""
+    return scn.probe_peers(
+        args.discover_time,
+        exclude_ip,
+        username,
+        password,
+        debug=args.debug,
+        reporter=_Warnings(),
+    )
 
 
 def _scn_write_to_peer(
@@ -168,11 +145,7 @@ def _cmd_scn_status(charger: AlfenCharger, args: argparse.Namespace) -> int:
 
 
 def _cmd_scn_create(charger: AlfenCharger, args: argparse.Namespace) -> int:
-    try:
-        name = scn.validate_name(args.name)
-    except scn.ScnError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return EXIT_ERROR
+    name = scn.validate_name(args.name)
     info = charger.basic_info()
     membership = scn.read_membership(charger)
     if membership.in_network:
@@ -219,11 +192,7 @@ def _cmd_scn_create(charger: AlfenCharger, args: argparse.Namespace) -> int:
 
 
 def _cmd_scn_join(charger: AlfenCharger, args: argparse.Namespace) -> int:
-    try:
-        name = scn.validate_name(args.name)
-    except scn.ScnError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return EXIT_ERROR
+    name = scn.validate_name(args.name)
     info = charger.basic_info()
     membership = scn.read_membership(charger)
     if membership.in_network:
@@ -410,5 +379,5 @@ def add_parsers(
 
 
 COMMANDS: dict[str, Command] = {
-    "scn": Command(cmd_scn),
+    "scn": Command(cmd_scn, default_action="status", fans_out=("status",)),
 }

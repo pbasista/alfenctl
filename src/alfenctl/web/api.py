@@ -23,31 +23,43 @@ ability to change anything.
 from __future__ import annotations
 
 import json
-import tempfile
+import secrets
+import threading
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import parse_qs
 
 import httpx
+from devicectl import fields
+from devicectl.report import Reporter
+from devicectl.web.http import ApiError, Request, Response, Route, discard, ok, spool
 
 from alfenctl import (
     __version__,
+    access,
     clock,
+    console,
     controls,
     hardware,
     loadbalancing,
     logs,
-    setup,
     properties,
+    scn,
+    setup,
     status as status_mod,
 )
 from alfenctl.charger import AlfenCharger
 from alfenctl.errors import AlfenError
+from alfenctl.transport import HTTP_NOT_FOUND
 from alfenctl.upgrade import install, send_image
 from alfenctl.web import schema
-from alfenctl.web.progress import DOWNLOAD_SHARE_OF_JOB, JobReporter
+from alfenctl.web.progress import (
+    DOWNLOAD_SHARE_OF_JOB,
+    download_reporter,
+    upgrade_reporter,
+)
 from alfenctl.web.session import Job, StationWorker, Target
 
 # The largest upload we will take from the browser.  A firmware image is
@@ -59,89 +71,166 @@ MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 LOG_PAGE_LINES = 200
 
 # What firmware without /api/chargingprofiles answers with.
-HTTP_NOT_FOUND = 404
+
+# The diagnostic protocol identifies requests with a byte-sized sequence ID.
+DIAGNOSTIC_SEQUENCE_MAX = 255
 
 
-class ApiError(AlfenError):
-    """A request that cannot be served, with the status to answer."""
+class Live:
+    """The part of the context that changes while the server is running.
 
-    def __init__(self, status: int, message: str) -> None:
-        """Record the HTTP status alongside the message."""
-        super().__init__(message)
-        self.status = status
-        self.message = message
+    One :class:`Context` is built at start-up and shared by every request
+    thread and by the worker thread, so anything on it that *changes* is
+    shared mutable state.  There are only three such values and they are all
+    small, but two of them are written from both sides -- the log cursor
+    moves on a request thread when the log view pages and on the worker
+    thread on every follow beat -- so they are kept here, behind one lock,
+    rather than as bare attributes that merely look settled.
+
+    Nothing here is a consistency boundary: each value stands alone, and the
+    lock exists so that a reader always sees one whole value rather than to
+    make a group of them agree.
+    """
+
+    def __init__(self) -> None:
+        """Start with nothing read and nothing being followed."""
+        self._lock = threading.Lock()
+        self._sockets = 1
+        self._follow_logs = False
+        self._log_last_id: int | None = None
+
+    @property
+    def sockets(self) -> int:
+        """How many sockets the last read reported."""
+        with self._lock:
+            return self._sockets
+
+    @sockets.setter
+    def sockets(self, count: int) -> None:
+        with self._lock:
+            self._sockets = count
+
+    @property
+    def follow_logs(self) -> bool:
+        """Whether the live refresh should also page the event log."""
+        with self._lock:
+            return self._follow_logs
+
+    @follow_logs.setter
+    def follow_logs(self, follow: bool) -> None:
+        with self._lock:
+            self._follow_logs = follow
+
+    @property
+    def log_last_id(self) -> int | None:
+        """The newest log line already sent to the browsers."""
+        with self._lock:
+            return self._log_last_id
+
+    @log_last_id.setter
+    def log_last_id(self, last: int | None) -> None:
+        with self._lock:
+            self._log_last_id = last
+
+    def forget(self) -> None:
+        """Drop everything read from the station we were just talking to."""
+        with self._lock:
+            self._sockets = 1
+            self._log_last_id = None
 
 
-@dataclass
-class Request:
-    """One parsed HTTP request."""
+class CloudLogins:
+    """Half-finished manufacturer sign-ins, from the authorize URL to the code.
 
-    method: str
-    path: str
-    query: dict[str, str] = field(default_factory=dict)
-    body: bytes = b""
+    The web UI runs the very flow the CLI's ``cloud login`` does: the server
+    makes the PKCE pair and a state, hands back the URL to open, and holds the
+    verifier until the browser comes back with the code.  The password is
+    never seen here -- it is typed on Alfen's own hosted page -- and a pending
+    sign-in is keyed by its state and forgotten after a short while, so an
+    abandoned one does not linger.
+    """
 
-    def json(self) -> dict[str, Any]:
-        """Parse the body as a JSON object."""
-        if not self.body:
-            return {}
-        try:
-            doc = json.loads(self.body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ApiError(400, f"malformed JSON body: {exc}") from None
-        if not isinstance(doc, dict):
-            raise ApiError(400, "expected a JSON object")
-        return doc
+    _TTL_S = 600.0
 
-    def param(self, name: str, default: str = "") -> str:
-        """One query-string parameter."""
-        return self.query.get(name, default)
+    def __init__(self) -> None:
+        """Start with no sign-in in flight."""
+        self._lock = threading.Lock()
+        # state -> (verifier, redirect_uri, born)
+        self._pending: dict[str, tuple[str, str, float]] = {}
 
-    def flag(self, name: str, default: bool = False) -> bool:
-        """One query-string parameter read as a boolean."""
-        raw = self.query.get(name)
-        if raw is None:
-            return default
-        return raw.strip().lower() in ("1", "true", "yes", "on")
+    def begin(self, origin: str | None = None) -> tuple[str, bool]:
+        """Start a sign-in; return ``(url, loopback)`` for the page to open.
+
+        When the page's ``origin`` is a ``http://localhost:<port>`` Alfen's
+        client accepts, the redirect comes back to that same origin and the
+        code is read without a paste (``loopback`` True).  Otherwise the mobile
+        scheme is used and the page falls back to pasting (``loopback`` False).
+        """
+        from alfenctl import cloud
+
+        verifier, challenge = cloud.make_pkce()
+        state = secrets.token_urlsafe(16)
+        redirect_uri, loopback = cloud.loopback_redirect(origin)
+        with self._lock:
+            self._prune()
+            self._pending[state] = (verifier, redirect_uri, time.time())
+        url = cloud.authorize_url(challenge, state, redirect_uri=redirect_uri)
+        return url, loopback
+
+    def complete(self, client: httpx.Client, redirected: str) -> Any:
+        """Trade the redirect for a token, matching it to its sign-in.
+
+        Works for both flows: a loopback lands the browser on the UI's own URL
+        (from which the page hands the whole address here), and the paste flow
+        hands the address the browser was left on.
+        """
+        from alfenctl import cloud
+
+        text = redirected.strip()
+        query = urllib.parse.urlparse(text).query if "?" in text else text
+        state = urllib.parse.parse_qs(query).get("state", [None])[0]
+        with self._lock:
+            self._prune()
+            entry = self._pending.pop(state, None) if state else None
+        if entry is None:
+            raise cloud.CloudError(
+                "this sign-in was not started here, or has expired; start it again"
+            )
+        verifier, redirect_uri, _born = entry
+        code = cloud.code_from_redirect(text, expected_state=state)
+        return cloud.exchange_code(client, code, verifier, redirect_uri=redirect_uri)
+
+    def _prune(self) -> None:
+        """Drop sign-ins past their life (called with the lock held)."""
+        cutoff = time.time() - self._TTL_S
+        stale = [s for s, (_v, _r, born) in self._pending.items() if born < cutoff]
+        for state in stale:
+            del self._pending[state]
 
 
-@dataclass
-class Response:
-    """One reply, ready to write."""
-
-    status: int = 200
-    body: bytes = b""
-    content_type: str = "application/json; charset=utf-8"
-    headers: dict[str, str] = field(default_factory=dict)
-
-
-def ok(payload: Any, status: int = 200) -> Response:
-    """Render a JSON reply."""
-    return Response(status=status, body=json.dumps(payload).encode("utf-8"))
-
-
-@dataclass
+@dataclass(frozen=True)
 class Context:
-    """Everything a handler needs besides the request."""
+    """Everything a handler needs besides the request.
+
+    Frozen on purpose: one of these is built when the server starts and is
+    then read by every request thread at once.  What changes while it runs
+    is :attr:`live`, and only that.
+    """
 
     worker: StationWorker
     read_only: bool = False
     debug: bool = False
     discover_time: float = 2.0
     config: Any = None
-    sockets: int = 1  # how many sockets the last read reported
-    follow_logs: bool = False
-    log_last_id: int | None = None
-    _catalog: Any = None
+    live: Live = field(default_factory=Live)
+    cloud_logins: CloudLogins = field(default_factory=CloudLogins)
 
     @property
     def catalog(self) -> Any:
-        """The EDS catalog, parsed once and reused."""
-        if self._catalog is None:
-            from alfenctl.eds import load_catalog
+        """The EDS catalog, parsed once per process and shared."""
+        from alfenctl.eds import load_catalog
 
-            self._catalog = load_catalog()
-        return self._catalog
+        return load_catalog()
 
 
 # --- reads -------------------------------------------------------------------------------
@@ -156,10 +245,28 @@ def get_state(ctx: Context, req: Request) -> Response:
             "link": ctx.worker.link_state(),
             "info": schema.info_json(ctx.worker.info),
             "jobs": ctx.worker.jobs(),
-            "followLogs": ctx.follow_logs,
+            "followLogs": ctx.live.follow_logs,
             "hasTarget": ctx.worker.target is not None,
+            "cloudSignedIn": _cloud_token_available(),
         }
     )
+
+
+def _cloud_token_available() -> bool:
+    """Whether a cached (or env) Alfen token exists, so a lookup needs no paste.
+
+    Only presence is checked, not that the token is still live -- a stale one
+    is renewed from its refresh half when the lookup runs.  This is what lets
+    the License card show "signed in" straight after a page reload, and after
+    a sign-in the CLI's ``cloud login`` did.
+    """
+    from alfenctl import cloud
+    from alfenctl.config import default_config_dir
+
+    try:
+        return cloud.token_from_sources(config_dir=default_config_dir()) is not None
+    except cloud.CloudError:
+        return False
 
 
 def get_stations(ctx: Context, req: Request) -> Response:
@@ -203,7 +310,7 @@ def _read_status(ctx: Context, charger: AlfenCharger) -> dict[str, Any]:
     CLI calls too -- categories plus the ids the walk does not carry -- so a
     number in the browser is the number ``alfenctl status`` prints.
     """
-    snapshot = schema.status_json(status_mod.collect(charger, ctx.sockets or 1))
+    snapshot = schema.status_json(status_mod.collect(charger, ctx.live.sockets or 1))
     snapshot["at"] = time.time()
     return snapshot
 
@@ -213,7 +320,7 @@ def get_dashboard(ctx: Context, req: Request) -> Response:
 
     def read(charger: AlfenCharger) -> dict[str, Any]:
         info = charger.basic_info()
-        ctx.sockets = info.sockets or 1
+        ctx.live.sockets = info.sockets or 1
         doc: dict[str, Any] = {
             "info": schema.info_json(info),
             "status": _read_status(ctx, charger),
@@ -350,40 +457,8 @@ def get_logs(ctx: Context, req: Request) -> Response:
         page = ctx.worker.run("Reading the event log", read)
 
     newest = max((ln.id for ln in page if ln.id is not None), default=None)
-    ctx.log_last_id = newest if newest is not None else ctx.log_last_id
+    ctx.live.log_last_id = newest if newest is not None else ctx.live.log_last_id
     return ok({"lines": [schema.log_json(line) for line in page]})
-
-
-def get_clients(ctx: Context, req: Request) -> Response:
-    """Who is watching: one row per open event stream.
-
-    The link pill counts them; this says which they are, which is what tells
-    "my other tab" from "someone else on the network holding the charger".
-    """
-    return ok({"clients": [schema.client_json(c) for c in ctx.worker.events.clients()]})
-
-
-def post_focus(ctx: Context, req: Request) -> Response:
-    """Ask every open tab to bring the page it already has to the front.
-
-    This is how a second ``alfenctl ui`` avoids opening a second tab: it
-    finds the port taken, asks whoever holds it to raise the page, and stops.
-    Nothing on the charger changes, so a read-only server answers it too --
-    and the reply names the app, which is how the caller knows it reached
-    another alfenctl rather than something else listening on that port.
-    """
-    ctx.worker.events.publish("focus", {"at": time.time()})
-    clients = ctx.worker.events.clients()
-    return ok(
-        {
-            "app": "alfenctl",
-            "version": __version__,
-            "clients": ctx.worker.events.subscriber_count,
-            # The caller is a second `alfenctl ui` with no stream of its own,
-            # so it can only name the tabs it just raised if we name them.
-            "watching": schema.name_watchers(clients),
-        }
-    )
 
 
 def get_firmware_available(ctx: Context, req: Request) -> Response:
@@ -477,8 +552,7 @@ def post_station(ctx: Context, req: Request) -> Response:
             debug=ctx.debug,
         )
     )
-    ctx.sockets = 1
-    ctx.log_last_id = None
+    ctx.live.forget()
     return ok({"link": ctx.worker.link_state()})
 
 
@@ -503,12 +577,12 @@ def post_live(ctx: Context, req: Request) -> Response:
     """
     doc = req.json()
     if "logs" in doc:
-        ctx.follow_logs = bool(doc["logs"])
+        ctx.live.follow_logs = bool(doc["logs"])
     ctx.worker.set_poll(
         live=bool(doc["enabled"]) if "enabled" in doc else None,
         interval=float(doc["interval"]) if doc.get("interval") else None,
     )
-    return ok({"link": ctx.worker.link_state(), "followLogs": ctx.follow_logs})
+    return ok({"link": ctx.worker.link_state(), "followLogs": ctx.live.follow_logs})
 
 
 def make_poll(ctx: Context) -> Callable[[AlfenCharger], None]:
@@ -517,9 +591,9 @@ def make_poll(ctx: Context) -> Callable[[AlfenCharger], None]:
     def poll(charger: AlfenCharger) -> None:
         snapshot = _read_status(ctx, charger)
         ctx.worker.events.publish("status", snapshot, sticky=True)
-        if ctx.follow_logs:
-            tail = logs.poll(charger, ctx.log_last_id)
-            ctx.log_last_id = tail.last_id
+        if ctx.live.follow_logs:
+            tail = logs.poll(charger, ctx.live.log_last_id)
+            ctx.live.log_last_id = tail.last_id
             if tail.lines:
                 ctx.worker.events.publish(
                     "log",
@@ -602,36 +676,26 @@ def post_controls(ctx: Context, req: Request) -> Response:
     """Set a current limit or the display brightness.
 
     Everything named in the body goes in one write, so moving both sockets
-    at once is one hold of the connection rather than two.
+    at once is one hold of the connection rather than two.  Only the sockets
+    are named here: they are a list of their own rather than a field, and the
+    rest of the body is checked against the field table.
     """
-    doc = req.json()
+    doc = dict(req.json())
     sockets: dict[int, float] = {}
-    for item in doc.get("sockets") or []:
+    for item in doc.pop("sockets", None) or []:
         if not isinstance(item, dict) or "number" not in item:
             raise ApiError(400, "each socket needs a 'number' and a current")
         amps = _amps(item, "maxCurrentA")
         if amps is not None:
             sockets[int(item["number"])] = amps
-    intensity = doc.get("intensity")
-    auto_dim = doc.get("autoDim")
+    settings = fields.from_document(controls.FIELDS, doc)
+    if sockets:
+        settings["sockets"] = sockets
 
     def write(charger: AlfenCharger) -> dict[str, Any]:
-        try:
-            after = controls.apply(
-                charger,
-                station_max_a=_amps(doc, "stationMaxCurrentA"),
-                sockets=sockets,
-                intensity=None if intensity is None else int(intensity),
-                auto_dim=None if auto_dim is None else bool(auto_dim),
-                temp_alarm_low=_number(doc, "temperatureAlarmLowC", "degrees"),
-                temp_alarm_high=_number(doc, "temperatureAlarmHighC", "degrees"),
-            )
-        except controls.ControlError as exc:
-            raise ApiError(400, str(exc)) from None
-        return schema.controls_json(after) or {}
+        return schema.controls_json(controls.apply(charger, settings)) or {}
 
-    result = ctx.worker.run("Writing charger settings", write)
-    return ok({"controls": result})
+    return ok({"controls": ctx.worker.run("Writing charger settings", write)})
 
 
 def post_reboot(ctx: Context, req: Request) -> Response:
@@ -689,24 +753,206 @@ def post_license(ctx: Context, req: Request) -> Response:
     )
 
 
-def _discard(path: Path) -> None:
-    """Remove a spooled upload and the directory it was written into."""
-    import shutil
+def post_cloud_login(ctx: Context, req: Request) -> Response:
+    """Run Alfen's hosted sign-in for the UI: start it, or finish it.
 
-    shutil.rmtree(path.parent, ignore_errors=True)
+    ``{"action":"start","origin":"<page origin>"}`` returns the URL to open
+    and whether it is a loopback sign-in.  When the page is served from a
+    ``http://localhost:<port>`` Alfen accepts, the redirect comes straight back
+    to the app and the code is read with nothing to paste; otherwise the reply
+    says ``loopback: false`` and the page offers the paste field.  The user
+    types their Alfen username and password on Alfen's own page, never here.
+    ``{"action":"finish","redirected":"<url>"}`` trades the code the browser
+    was sent back for a token, caches it beside the config (0600, tokens
+    only, the same cache the CLI's ``cloud login`` writes), and reports whose
+    account it is.  The token then backs the lookup with nothing to paste.
+    ``{"action":"logout"}`` deletes that cache, so the page can sign out and
+    let a different account sign in.
+    """
+    from alfenctl import cloud
+    from alfenctl.config import default_config_dir
+
+    doc = req.json()
+    action = str(doc.get("action") or "").strip().lower()
+    if action == "start":
+        origin = str(doc.get("origin") or "").strip() or None
+        url, loopback = ctx.cloud_logins.begin(origin)
+        return ok({"url": url, "loopback": loopback})
+    if action == "logout":
+        removed = cloud.clear_cached_token(default_config_dir())
+        return ok({"signedOut": True, "removed": removed})
+    if action != "finish":
+        raise ApiError(400, "action must be 'start', 'finish' or 'logout'")
+
+    redirected = str(doc.get("redirected") or "").strip()
+    if not redirected:
+        raise ApiError(400, "paste the address the browser was redirected to")
+    client = cloud.make_client()
+    try:
+        try:
+            token = ctx.cloud_logins.complete(client, redirected)
+        except cloud.CloudError as exc:
+            raise ApiError(400, str(exc)) from None
+        cloud.save_cached_token(default_config_dir(), token)
+        who = _cloud_try(
+            lambda: cloud.MyEveClient(
+                token.access_token, client=client
+            ).authenticated_user()
+        )
+    finally:
+        client.close()
+    return ok({"account": _cloud_account_name(who)})
+
+
+def _cloud_account_name(user: Any) -> str | None:
+    """Pull a display name (or the uuid) out of a getAuthenticatedUser reply."""
+    if not isinstance(user, dict):
+        return None
+    profile = user.get("profileInformation") or {}
+    name = " ".join(p for p in (profile.get("firstName"), profile.get("lastName")) if p)
+    return name or user.get("uuid")
+
+
+def post_cloud(ctx: Context, req: Request) -> Response:
+    """Look a station up on Alfen's servers, for the owner's information.
+
+    Reads the account, the warranty, and the license key Alfen has on file
+    (which the License card can then install through the ordinary write
+    route).  The token is whichever the page supplied, or -- once the user
+    has signed in through ``/api/cloud/login`` -- the cached one, renewed
+    from its refresh half if it has expired.  A supplied token is never
+    stored; the Alfen password is never involved.
+    """
+    from alfenctl import cloud
+    from alfenctl.config import default_config_dir
+    from alfenctl.license import LicenseKeyError, normalize_license_key, read_license
+
+    body_token = str(req.json().get("token") or "").strip()
+    config_dir = default_config_dir()
+    token = (
+        cloud.Token(access_token=body_token)
+        if body_token
+        else cloud.token_from_sources(config_dir=config_dir)
+    )
+    if token is None:
+        raise ApiError(400, "sign in to Alfen first, or supply an access token")
+
+    def read(charger: AlfenCharger) -> dict[str, Any]:
+        info = charger.basic_info()
+        current = read_license(charger).license_key
+        return {
+            "identifier": info.object_id,
+            "sockets": info.sockets or 1,
+            "installed": current,
+        }
+
+    local = ctx.worker.run("Reading station identity", read)
+
+    def _norm(raw: str | None) -> str | None:
+        if not raw:
+            return None
+        try:
+            return normalize_license_key(raw)
+        except LicenseKeyError:
+            # An odd key from either side should dim the row, not fail the read.
+            return raw
+
+    client = cloud.make_client()
+    try:
+        if token.expired and token.refresh_token:
+            try:
+                token = cloud.refresh_token(client, token)
+            except cloud.CloudError as exc:
+                raise ApiError(401, str(exc)) from None
+            if not body_token:
+                cloud.save_cached_token(config_dir, token)
+        myeve = cloud.MyEveClient(token.access_token, client=client)
+        user = _cloud_try(lambda: myeve.authenticated_user())
+        warranty = _cloud_try(lambda: myeve.warranty(local["identifier"]))
+        recorded = _cloud_try(lambda: myeve.last_created(local["identifier"]))
+        defaults = _cloud_try(
+            lambda: myeve.factory_defaults(local["identifier"], local["sockets"])
+        )
+        try:
+            registered = myeve.license_key(local["identifier"], local["sockets"])
+        except cloud.CloudError as exc:
+            raise ApiError(502, str(exc)) from None
+    finally:
+        client.close()
+
+    return ok(
+        schema.cloud_json(
+            local["identifier"],
+            local["sockets"],
+            user=user,
+            warranty=warranty,
+            registered_key=_norm(registered),
+            installed_key=_norm(local["installed"]),
+            recorded=recorded if isinstance(recorded, dict) else None,
+            defaults=_decorate_defaults(
+                ctx, defaults if isinstance(defaults, list) else []
+            ),
+        )
+    )
+
+
+def _decorate_defaults(
+    ctx: Context, defaults: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Name each factory-default property, the way the property views do.
+
+    The server hands back bare ``id``/``value`` pairs; this adds the EDS
+    catalog's title (or the program's glossary where the EDS is silent), so
+    the page shows the manufacturer's profile as properties rather than a
+    column of register numbers.  Sorted by id, so the list is stable.
+    """
+    from alfenctl.glossary import title as glossary_title
+    from alfenctl.transport import parse_prop_id
+
+    catalog = ctx.catalog
+    rows: list[dict[str, Any]] = []
+    for entry in defaults:
+        prop_id = str(entry.get("id") or "")
+        key = parse_prop_id(prop_id)
+        described = catalog.get(key) if key else None
+        title = (described.title if described else "") or (
+            glossary_title(key) if key else ""
+        )
+        rows.append(
+            {
+                "id": prop_id,
+                "name": described.name if described else "",
+                "title": title,
+                "value": entry.get("value"),
+            }
+        )
+    rows.sort(key=lambda row: row["id"])
+    return rows
+
+
+def _cloud_try(call: Callable[[], Any]) -> Any:
+    """Run one cloud sub-query, returning None on the failures we can survive.
+
+    The lookup gathers several independent answers; one the account is not
+    entitled to should dim a field, not fail the whole request.
+    """
+    from alfenctl.cloud import CloudError
+
+    try:
+        return call()
+    except CloudError:
+        return None
 
 
 def _spool(req: Request, suffix: str) -> Path:
     """Write an uploaded body to a temporary file for the modules that want a path."""
-    if not req.body:
-        raise ApiError(400, "no file content was uploaded")
-    if len(req.body) > MAX_UPLOAD_BYTES:
-        raise ApiError(413, "that file is far larger than anything a charger takes")
-    name = Path(req.param("filename", "upload")).name or "upload"
-    directory = Path(tempfile.mkdtemp(prefix="alfenctl-ui-"))
-    path = directory / (name if Path(name).suffix else name + suffix)
-    path.write_bytes(req.body)
-    return path
+    return spool(
+        req,
+        max_bytes=MAX_UPLOAD_BYTES,
+        prefix="alfenctl-ui-",
+        suffix=suffix,
+        too_large="that file is far larger than anything a charger takes",
+    )
 
 
 def post_logo(ctx: Context, req: Request) -> Response:
@@ -729,7 +975,7 @@ def post_logo(ctx: Context, req: Request) -> Response:
     if not req.flag("force"):
         display = ctx.worker.run("Reading the display", read_display)
         if not display.present:
-            _discard(path)
+            discard(path)
             raise ApiError(
                 400,
                 "this station has no display, so a logo would be transferred "
@@ -744,12 +990,12 @@ def post_logo(ctx: Context, req: Request) -> Response:
             send_image(
                 charger,
                 package,
-                report=JobReporter(job, start=0.1),
+                report=upgrade_reporter(job, start=0.1),
                 label="Uploading the logo",
                 is_ahp=kind == "tvf",
             )
         finally:
-            _discard(path)
+            discard(path)
         job.result = {
             "kind": kind,
             "bytes": len(package),
@@ -807,15 +1053,14 @@ def post_firmware_release(ctx: Context, req: Request) -> Response:
         if match is None:
             raise RuntimeError(f"{config.location} no longer publishes {wanted}")
 
-        def on_bytes(done: int, total: int | None) -> None:
-            share = (done / total) if total else 0.0
-            job.report(DOWNLOAD_SHARE_OF_JOB * share)
-
-        job.report(message=f"Downloading {match.name}", force=True)
         family = (ctx.worker.info.family if ctx.worker.info else "") or ""
         try:
             path = download(
-                match, family, config=config, cache_dir=cache_dir, on_progress=on_bytes
+                match,
+                family,
+                config=config,
+                cache_dir=cache_dir,
+                report=download_reporter(job),
             )
         except RepositoryError as exc:
             raise RuntimeError(str(exc)) from None
@@ -842,7 +1087,7 @@ def _install_firmware(
         image = FirmwareFile.load(path)
     finally:
         if not keep:  # megabytes; do not leave it in /tmp
-            _discard(path)
+            discard(path)
     info = charger.basic_info()
     result = check_compatibility(info.family, info.firmware_version, image)
     job.result = {
@@ -853,7 +1098,7 @@ def _install_firmware(
     if not result.ok and not force:
         raise ApiError(400, "; ".join(result.errors) or "incompatible firmware")
 
-    report = JobReporter(job, start=job.progress or 0.0)
+    report = upgrade_reporter(job, start=job.progress or 0.0)
     install(charger, image.data, report=report)
     if report.warnings:
         job.result["commitWarning"] = "; ".join(report.warnings)
@@ -912,12 +1157,14 @@ def get_master_tag(ctx: Context, req: Request) -> Response:
     return ok({"masterTag": schema.master_tag_json(state)})
 
 
-def get_network(ctx: Context, req: Request) -> Response:
-    """Where the charger is on the network, per interface."""
-    from alfenctl import network
+def get_connectivity(ctx: Context, req: Request) -> Response:
+    """Where the charger is reachable, per interface."""
+    from alfenctl import connectivity
 
-    state = ctx.worker.run("Reading the network", lambda charger: network.read(charger))
-    return ok({"network": schema.network_json(state)})
+    state = ctx.worker.run(
+        "Reading the interfaces", lambda charger: connectivity.read(charger)
+    )
+    return ok({"connectivity": schema.connectivity_json(state)})
 
 
 def get_wifi_scan(ctx: Context, req: Request) -> Response:
@@ -926,15 +1173,15 @@ def get_wifi_scan(ctx: Context, req: Request) -> Response:
     The radio takes seconds to come up, so enabling is done under the same
     worker task as the scan and the reply says which happened.
     """
-    from alfenctl import network, wifi
+    from alfenctl import connectivity, wifi
 
     def scan(charger: AlfenCharger) -> dict[str, Any]:
-        state = network.read(charger)
+        state = connectivity.read(charger)
         enabled = False
         obstacle = state.scan_obstacle()
         if obstacle and req.flag("enable") and state.wifi_hardware is not False:
-            network.enable(charger)
-            state = network.wait_for_radio(charger)
+            connectivity.enable(charger)
+            state = connectivity.wait_for_radio(charger)
             enabled = True
             obstacle = state.scan_obstacle()
         if obstacle:
@@ -1040,18 +1287,38 @@ def get_scn(ctx: Context, req: Request) -> Response:
     return ok(ctx.worker.run("Reading SCN membership", read))
 
 
+class _PeerWarnings(Reporter):
+    """Puts a skipped peer's warning on the event stream, not the server's log.
+
+    The CLI prints these to its own stderr; here they belong in front of the
+    person who pressed the button.  ``progress`` is throttled, so a burst of
+    unreachable stations shows the last of them rather than all -- which is
+    what the pill has room for anyway.
+    """
+
+    def __init__(self, worker: StationWorker) -> None:
+        """Report onto ``worker``'s current-operation note."""
+        self.worker = worker
+
+    def warn(self, message: str) -> None:
+        """Show one skipped peer as the running read's note."""
+        self.worker.progress(None, message)
+
+
 def _scn_probe_peers(ctx: Context, charger: AlfenCharger) -> list[Any]:
     """Probe the LAN for the other chargers in this charger's network.
 
     The CLI opens one connection per peer; the worker owns ours, so this
     reaches around it the same way ``alfenctl scn --peers`` does.
     """
-    import argparse
-
-    from alfenctl.cli.commands.scn import _scn_probe_peers as cli_probe
-
-    args = argparse.Namespace(discover_time=ctx.discover_time)
-    found = cli_probe(args, charger.station.ip, charger.username, charger.password)
+    found = scn.probe_peers(
+        ctx.discover_time,
+        charger.station.ip,
+        charger.username,
+        charger.password,
+        debug=ctx.debug,
+        reporter=_PeerWarnings(ctx.worker),
+    )
     return [peer for _station, peer in found]
 
 
@@ -1158,8 +1425,7 @@ def get_preset(ctx: Context, req: Request) -> Response:
     No charger is touched, so it does not go through the worker: this is a
     read of Alfen's own server, like the preset list beside it.
     """
-    from alfenctl import meter_map as meter_map_mod
-    from alfenctl import settings as settings_mod
+    from alfenctl import meter_map as meter_map_mod, settings as settings_mod
     from alfenctl.charger import parse_prop_id
     from alfenctl.glossary import title as glossary_title
     from alfenctl.repo import fetch_preset, fetch_preset_bytes
@@ -1222,22 +1488,15 @@ def get_preset(ctx: Context, req: Request) -> Response:
 def get_console_commands(ctx: Context, req: Request) -> Response:
     """List what the charger's console is known to do (from the CLI's table).
 
-    The note goes with it.  Two thirds of this table has no command in it,
-    which reads as a table two thirds broken until somebody says why the
-    column is empty -- the terminal prints that sentence under
-    ``alfenctl cmd --list``, and it is the same sentence about the same
-    table, so it travels with the table rather than being written out a
-    second time in another language.
+    The CLI and web console share both the command catalog and its note
+    distinguishing client dispatch from firmware support and SSA access.
     """
-    from alfenctl.cli.commands.maintenance import (
-        CONSOLE_COMMANDS,
-        CONSOLE_UNKNOWN_NOTE,
-    )
-
     return ok(
         {
-            "commands": [schema.console_command_json(*row) for row in CONSOLE_COMMANDS],
-            "note": CONSOLE_UNKNOWN_NOTE,
+            "commands": [
+                schema.console_command_json(*row) for row in console.CONSOLE_COMMANDS
+            ],
+            "note": console.CONSOLE_UNKNOWN_NOTE,
         }
     )
 
@@ -1279,40 +1538,24 @@ def _opt_text(doc: dict[str, Any], name: str) -> str | None:
 
 
 def post_loadbalancing(ctx: Context, req: Request) -> Response:
-    """Write the load-balancing and solar settings that were named."""
-    from alfenctl import loadbalancing
-    from alfenctl.loadbalancing import LoadBalancingError
+    """Write the load-balancing and solar settings that were named.
 
-    doc = req.json()
-    flags = _flags(doc, "static", "active", "phaseSwitching", "measurementIncludesEv")
-    boost = doc.get("solarBoost")
+    The body names fields the way the field table does, so nothing here lists
+    them: an unknown key, a read-only one, and a value out of range are all
+    refused by the table, in the same words the command line would use.
+    """
+    from alfenctl import loadbalancing
+
+    doc = dict(req.json())
+    boost = doc.pop("solarBoost", None)
     if boost is not None and not isinstance(boost, dict):
         raise ApiError(400, "solarBoost must map a socket number to true or false")
+    settings = fields.from_document(loadbalancing.FIELDS, doc)
+    if boost:
+        settings["solar_boost"] = {int(k): bool(v) for k, v in boost.items()}
 
     def write(charger: AlfenCharger) -> dict[str, Any]:
-        try:
-            after = loadbalancing.apply(
-                charger,
-                static=flags.get("static"),
-                active=flags.get("active"),
-                protocol=_opt_int(doc, "protocol"),
-                data_source=_opt_int(doc, "dataSource"),
-                max_meter_current_a=_number(doc, "maxMeterCurrentA", "amps"),
-                safe_current_a=_number(doc, "safeCurrentA", "amps"),
-                max_imbalance_a=_number(doc, "maxImbalanceA", "amps"),
-                phase_rotation=_opt_text(doc, "phaseRotation"),
-                measurement_includes_ev=flags.get("measurementIncludesEv"),
-                phase_switching=flags.get("phaseSwitching"),
-                max_allowed_phases=_opt_int(doc, "maxAllowedPhases"),
-                solar_mode=_opt_int(doc, "solarMode"),
-                solar_green_share=_opt_int(doc, "solarGreenShare"),
-                solar_comfort_w=_opt_int(doc, "solarComfortW"),
-                solar_boost=(
-                    {int(k): bool(v) for k, v in boost.items()} if boost else None
-                ),
-            )
-        except LoadBalancingError as exc:
-            raise ApiError(400, str(exc)) from None
+        after = loadbalancing.apply(charger, settings)
         return schema.loadbalancing_json(after) or {}
 
     return ok({"loadbalancing": ctx.worker.run("Writing load balancing", write)})
@@ -1321,39 +1564,11 @@ def post_loadbalancing(ctx: Context, req: Request) -> Response:
 def post_authorization(ctx: Context, req: Request) -> Response:
     """Write the authorization settings that were named."""
     from alfenctl import authorization
-    from alfenctl.authorization import AuthorizationError
 
-    doc = req.json()
-    flags = _flags(
-        doc,
-        "whitelist",
-        "localList",
-        "restartAfterOutage",
-        "remoteTxRequests",
-        "stopOnInvalidTag",
-        "abortConcurrent",
-    )
+    settings = fields.from_document(authorization.FIELDS, req.json())
 
     def write(charger: AlfenCharger) -> dict[str, Any]:
-        try:
-            after = authorization.apply(
-                charger,
-                mode=_opt_int(doc, "mode"),
-                plug_and_charge_id=_opt_text(doc, "plugAndChargeId"),
-                whitelist=flags.get("whitelist"),
-                local_list=flags.get("localList"),
-                restart_after_outage=flags.get("restartAfterOutage"),
-                max_outage_s=_opt_int(doc, "maxOutageS"),
-                remote_tx_requests=flags.get("remoteTxRequests"),
-                stop_on_invalid_tag=flags.get("stopOnInvalidTag"),
-                abort_concurrent=flags.get("abortConcurrent"),
-                connection_timeout_s=_opt_int(doc, "connectionTimeoutS"),
-                authorization_timeout_s=_opt_int(doc, "authorizationTimeoutS"),
-                online_action=_opt_int(doc, "onlineAction"),
-                offline_action=_opt_int(doc, "offlineAction"),
-            )
-        except AuthorizationError as exc:
-            raise ApiError(400, str(exc)) from None
+        after = authorization.apply(charger, settings)
         return schema.authorization_json(after) or {}
 
     return ok({"authorization": ctx.worker.run("Writing authorization", write)})
@@ -1362,39 +1577,11 @@ def post_authorization(ctx: Context, req: Request) -> Response:
 def post_ocpp(ctx: Context, req: Request) -> Response:
     """Write the backoffice connection settings that were named."""
     from alfenctl import ocpp
-    from alfenctl.ocpp import OcppError
 
-    doc = req.json()
-    flags = _flags(doc, "sendStationStatus", "infoNotifications", "proxyEnabled")
+    settings = fields.from_document(ocpp.FIELDS, req.json())
 
     def write(charger: AlfenCharger) -> dict[str, Any]:
-        try:
-            after = ocpp.apply(
-                charger,
-                connect_method=_opt_int(doc, "connectMethod"),
-                protocol=_opt_text(doc, "protocol"),
-                wired_url=_opt_text(doc, "wiredUrl"),
-                wired_path=_opt_text(doc, "wiredPath"),
-                mobile_url=_opt_text(doc, "mobileUrl"),
-                mobile_path=_opt_text(doc, "mobilePath"),
-                heartbeat_s=_opt_int(doc, "heartbeatS"),
-                ping_pong_s=_opt_int(doc, "pingPongS"),
-                meter_interval_s=_opt_int(doc, "meterIntervalS"),
-                aligned_interval_s=_opt_int(doc, "alignedIntervalS"),
-                send_station_status=flags.get("sendStationStatus"),
-                status_mode=_opt_int(doc, "statusMode"),
-                info_notifications=flags.get("infoNotifications"),
-                tx_attempts=_opt_int(doc, "txAttempts"),
-                tx_retry_s=_opt_int(doc, "txRetryS"),
-                cpo_name=_opt_text(doc, "cpoName"),
-                security_profile=_opt_int(doc, "securityProfile"),
-                proxy_enabled=flags.get("proxyEnabled"),
-                proxy_address=_opt_text(doc, "proxyAddress"),
-                proxy_user=_opt_text(doc, "proxyUser"),
-            )
-        except OcppError as exc:
-            raise ApiError(400, str(exc)) from None
-        return schema.ocpp_json(after) or {}
+        return schema.ocpp_json(ocpp.apply(charger, settings)) or {}
 
     return ok({"ocpp": ctx.worker.run("Writing the backoffice settings", write)})
 
@@ -1474,8 +1661,8 @@ def post_master_tag(ctx: Context, req: Request) -> Response:
 
 def post_wifi(ctx: Context, req: Request) -> Response:
     """Join a network, or switch the radio on or off, or run its access point."""
-    from alfenctl import network
-    from alfenctl.network import NetworkError
+    from alfenctl import connectivity
+    from alfenctl.connectivity import ConnectivityError
 
     doc = req.json()
     action = str(doc.get("action") or "")
@@ -1488,28 +1675,28 @@ def post_wifi(ctx: Context, req: Request) -> Response:
             if action == "connect":
                 if not ssid:
                     raise ApiError(400, "name the network to join")
-                after = network.connect(charger, ssid, psk, security=security)
+                after = connectivity.connect(charger, ssid, psk, security=security)
             elif action == "enable":
-                after = network.enable(charger)
+                after = connectivity.enable(charger)
             elif action == "disconnect":
-                after = network.disconnect(charger)
+                after = connectivity.disconnect(charger)
             elif action == "ap":
                 enabled = doc.get("enabled")
-                after = network.set_access_point(
+                after = connectivity.set_access_point(
                     charger,
                     enabled=None if enabled is None else bool(enabled),
                     start=None,
                 )
             else:
                 raise ApiError(400, "action is connect, enable, disconnect or ap")
-        except NetworkError as exc:
+        except ConnectivityError as exc:
             raise ApiError(400, str(exc)) from None
-        return schema.network_json(after) or {}
+        return schema.connectivity_json(after) or {}
 
     label = {"connect": f"Joining {ssid}", "ap": "Switching the access point"}.get(
         action, f"Wi-Fi {action}"
     )
-    return ok({"network": ctx.worker.run(label, write)})
+    return ok({"connectivity": ctx.worker.run(label, write)})
 
 
 def post_meter_map(ctx: Context, req: Request) -> Response:
@@ -1672,65 +1859,83 @@ def _reboot_after_scn(ctx: Context, charger: AlfenCharger, info: Any) -> None:
     ctx.worker.release()
 
 
+def _password_set(charger: AlfenCharger, doc: dict[str, Any]) -> dict[str, Any]:
+    """Change the installer password the CLI and this UI log in with."""
+    password = _opt_text(doc, "password")
+    if not password:
+        raise ApiError(400, "name the new password")
+    charger.set_password(password)
+    return {
+        "message": "Password changed. Update alfen.toml so the next login can use it."
+    }
+
+
+def _password_temporary(charger: AlfenCharger, doc: dict[str, Any]) -> dict[str, Any]:
+    """Set a password the charger reverts from on its own."""
+    password = _opt_text(doc, "password")
+    hours = _opt_int(doc, "hours")
+    if not password or hours is None:
+        raise ApiError(400, "name the password and the hours")
+    charger.set_temporary_password(password, hours)
+    return {
+        "message": f"Temporary password set; the charger reverts to the "
+        f"previous one in {hours} hour(s)."
+    }
+
+
+def _password_recover(charger: AlfenCharger, doc: dict[str, Any]) -> dict[str, Any]:
+    """Reset to the charger's default, with the code it shows on its screen."""
+    code = _opt_text(doc, "code")
+    if not code:
+        raise ApiError(400, "name the recovery code from the charger")
+    try:
+        charger.reset_password(code)
+    except httpx.HTTPStatusError as exc:
+        raise ApiError(400, access.recovery_error(exc)) from None
+    return {"message": "The password has been reset to the charger's default."}
+
+
+def _password_pin(charger: AlfenCharger, doc: dict[str, Any]) -> dict[str, Any]:
+    """Set, clear or disable the PIN the Eve Connect app asks a driver for.
+
+    The three answers are different: a PIN sets one, an empty string lets the
+    app in without one, and no key at all turns app access off.
+    """
+    pin = _opt_text(doc, "pin")
+    if pin == "":
+        charger.set_end_user_pin("")
+        return {"message": "Eve Connect app access enabled without a PIN."}
+    if pin is None:
+        charger.disable_end_user_access()
+        return {"message": "Eve Connect app access disabled."}
+    if not access.PIN_RE.match(pin):
+        raise ApiError(400, "the PIN must be 4 to 6 digits")
+    charger.set_end_user_pin(pin)
+    return {"message": "Eve Connect app access PIN set."}
+
+
+_PASSWORD_ACTIONS: dict[
+    str, Callable[[AlfenCharger, dict[str, Any]], dict[str, Any]]
+] = {
+    "set": _password_set,
+    "temporary": _password_temporary,
+    "recover": _password_recover,
+    "pin": _password_pin,
+}
+
+
 def post_password(ctx: Context, req: Request) -> Response:
     """Set, time-limit or recover the login password, or the app PIN."""
     doc = req.json()
     action = str(doc.get("action") or "")
-
-    def write(charger: AlfenCharger) -> dict[str, Any]:
-        if action == "set":
-            password = _opt_text(doc, "password")
-            if not password:
-                raise ApiError(400, "name the new password")
-            charger.set_password(password)
-            return {
-                "message": "Password changed. Update alfen.toml so the next "
-                "login can use it."
-            }
-        if action == "temporary":
-            password = _opt_text(doc, "password")
-            hours = _opt_int(doc, "hours")
-            if not password or hours is None:
-                raise ApiError(400, "name the password and the hours")
-            charger.set_temporary_password(password, hours)
-            return {
-                "message": f"Temporary password set; the charger reverts to the "
-                f"previous one in {hours} hour(s)."
-            }
-        if action == "recover":
-            code = _opt_text(doc, "code")
-            if not code:
-                raise ApiError(400, "name the recovery code from the charger")
-            try:
-                charger.reset_password(code)
-            except httpx.HTTPStatusError as exc:
-                raise ApiError(400, _recovery_error(exc)) from None
-            return {"message": "The password has been reset to the charger's default."}
-        if action == "pin":
-            pin = _opt_text(doc, "pin")
-            if pin == "":
-                charger.set_end_user_pin("")
-                return {"message": "Eve Connect app access enabled without a PIN."}
-            if pin is None:
-                charger.disable_end_user_access()
-                return {"message": "Eve Connect app access disabled."}
-            if not _PIN_RE.match(pin):
-                raise ApiError(400, "the PIN must be 4 to 6 digits")
-            charger.set_end_user_pin(pin)
-            return {"message": "Eve Connect app access PIN set."}
+    run = _PASSWORD_ACTIONS.get(action)
+    if run is None:
         raise ApiError(400, "action is set, temporary, recover or pin")
 
+    def write(charger: AlfenCharger) -> dict[str, Any]:
+        return run(charger, doc)
+
     return ok(ctx.worker.run(f"Changing the {action} password", write))
-
-
-_PIN_RE = __import__("re").compile(r"^[0-9]{4,6}$")
-
-
-def _recovery_error(exc: httpx.HTTPStatusError) -> str:
-    """Turn the charger's refusal of a reset code into the app's wording."""
-    from alfenctl.cli.commands.access import _recovery_error as cli_wording
-
-    return cli_wording(exc)
 
 
 def post_secret(ctx: Context, req: Request) -> Response:
@@ -1793,6 +1998,41 @@ def post_console(ctx: Context, req: Request) -> Response:
     return ok(ctx.worker.run(f"Sending '{command}'", send))
 
 
+def post_diagnostic(ctx: Context, req: Request) -> Response:
+    """Submit a firmware-specific diagnostic through the station worker."""
+    doc = req.json()
+    command = (_opt_text(doc, "command") or "").strip()
+    if not command:
+        raise ApiError(400, "name the diagnostic command to send")
+    sequence_id = doc.get("sequenceId")
+    if type(sequence_id) is not int or not 0 <= sequence_id <= DIAGNOSTIC_SEQUENCE_MAX:
+        raise ApiError(400, "sequenceId must be a whole number from 0 to 255")
+    parameters = doc.get("parameters", [])
+    if not isinstance(parameters, list) or not all(
+        isinstance(value, str) for value in parameters
+    ):
+        raise ApiError(400, "parameters must be an ordered list of strings")
+
+    def send(charger: AlfenCharger) -> dict[str, Any]:
+        charger.send_diagnostic_command(command, sequence_id, parameters)
+        return {
+            "message": f"Submitted diagnostic '{command}' (sequence {sequence_id}). "
+            "Submission does not confirm completion."
+        }
+
+    return ok(ctx.worker.run(f"Submitting diagnostic '{command}'", send))
+
+
+def get_diagnostic_result(ctx: Context, req: Request) -> Response:
+    """Read the current diagnostic result once, preserving its JSON fields."""
+    return ok(
+        ctx.worker.run(
+            "Reading the diagnostic result",
+            lambda charger: charger.fetch_diagnostic_result(),
+        )
+    )
+
+
 def post_erase(ctx: Context, req: Request) -> Response:
     """Erase the settings, the personal data, or the transaction database."""
     doc = req.json()
@@ -1826,8 +2066,6 @@ def get_backup(ctx: Context, req: Request) -> Response:
     for the last two); ``?writableOnly=1`` skips what a restore could not
     write back anyway.
     """
-    import json as _json
-
     from alfenctl import properties, settings
     from alfenctl.charger import ChargerInfo
 
@@ -1842,7 +2080,7 @@ def get_backup(ctx: Context, req: Request) -> Response:
         info = charger.basic_info()
         if fmt == "json":
             payload = (
-                _json.dumps(
+                json.dumps(
                     [{"id": p.id_str, "name": p.name, "value": p.value} for p in props],
                     indent=2,
                 )
@@ -1880,77 +2118,50 @@ def post_restore(ctx: Context, req: Request) -> Response:
     """Apply an uploaded property file: preview the diff, or write it.
 
     ``?apply=1`` writes what a dry run only shows; the diff is computed
-    against the live charger either way, exactly as ``alfenctl import``
-    previews it.
+    against the live charger either way, by the same
+    :func:`alfenctl.properties.plan_import` that backs ``alfenctl import``,
+    so the browser is told about the read-only and device-bound properties
+    the terminal names rather than being handed a shorter list with no
+    explanation for the difference.
     """
-    import json as _json
-
-    from alfenctl import properties, settings
-    from alfenctl.values import coerce_input, is_portable, values_equal
+    from alfenctl import properties
 
     if not req.body:
         raise ApiError(400, "no file content was uploaded")
-    text = req.body.decode("utf-8", "replace")
     try:
-        if text.lstrip().startswith("<") or settings.looks_encrypted(text):
-            entries = list(settings.parse(text).as_entries())
-        else:
-            data = _json.loads(text)
-            if not isinstance(data, list) or not all(
-                isinstance(e, dict) and "id" in e and "value" in e for e in data
-            ):
-                raise ValueError('expected a JSON array of {"id", "value"} entries')
-            entries = data
-    except (ValueError, _json.JSONDecodeError) as exc:
+        entries = properties.parse_entries(req.body.decode("utf-8", "replace"))
+    except ValueError as exc:
         raise ApiError(400, f"cannot read the file: {exc}") from None
 
     force = req.flag("force")
     applying = req.flag("apply")
 
     def run(charger: AlfenCharger) -> dict[str, Any]:
-        queries = [str(e["id"]) for e in entries]
-        props, errors = properties.resolve(charger, ctx.catalog, queries)
-        by_id = {p.id_str: p for p in props}
-        writes: dict[tuple[int, int], tuple[Any, int | None]] = {}
-        plan: list[dict[str, Any]] = []
-        skipped_bound = 0
-        for entry in entries:
-            prop = by_id.get(str(entry["id"]))
-            if prop is None or not prop.writable:
-                continue
-            try:
-                value = coerce_input(prop, entry["value"])
-            except ValueError:
-                continue
-            if not is_portable(prop.key) and not force:
-                if not values_equal(prop, value):
-                    skipped_bound += 1
-                continue
-            if values_equal(prop, value):
-                continue
-            writes[prop.key] = (value, prop.data_type)
-            plan.append(
+        plan = properties.plan_import(charger, ctx.catalog, entries, force=force)
+        doc: dict[str, Any] = {
+            "changes": [
                 {
-                    "id": prop.id_str,
-                    "name": prop.name,
-                    "title": prop.title,
-                    "from": prop.encoded(prop.value),
-                    "to": prop.encoded(value),
+                    "id": c.prop.id_str,
+                    "name": c.prop.name,
+                    "title": c.prop.title,
+                    "from": c.before,
+                    "to": c.after,
                 }
-            )
-        if not applying:
-            return {
-                "changes": plan,
-                "skippedBound": skipped_bound,
-                "errors": errors,
-            }
-        charger.write_properties(writes)
-        return {
-            "applied": len(writes),
-            "changes": plan,
-            "skippedBound": skipped_bound,
-            "errors": errors,
+                for c in plan.changes
+            ],
+            "skippedBound": [{"id": p.id_str, "name": p.name} for p in plan.bound],
+            "skippedReadOnly": [
+                {"id": p.id_str, "name": p.name} for p in plan.read_only
+            ],
+            "invalid": [{"id": i, "error": why} for i, why in plan.invalid],
+            "errors": plan.missing,
         }
+        if not applying:
+            return doc
+        writes = plan.writes
+        charger.write_properties(writes)
+        doc["applied"] = len(writes)
+        return doc
 
     label = "Applying the settings file" if applying else "Previewing the settings file"
     return ok(ctx.worker.run(label, run))
@@ -1958,8 +2169,7 @@ def post_restore(ctx: Context, req: Request) -> Response:
 
 def post_preset(ctx: Context, req: Request) -> Response:
     """Apply one of Alfen's published presets, as a job."""
-    from alfenctl import meter_map as meter_map_mod
-    from alfenctl import settings as settings_mod
+    from alfenctl import meter_map as meter_map_mod, settings as settings_mod
     from alfenctl.repo import fetch_preset, fetch_preset_bytes
 
     doc = req.json()
@@ -1976,10 +2186,10 @@ def post_preset(ctx: Context, req: Request) -> Response:
         preset = presets[0]
         job.result = {"preset": schema.preset_json(preset)}
         if preset.is_backoffice:
-            from alfenctl.cli.commands.props import (
+            from alfenctl.ocpp import (
                 BACKOFFICE_CLEARED,
-                P_BACKOFFICE_NAME,
                 BACKOFFICE_NAME_MAX,
+                P_BACKOFFICE_NAME,
             )
             from alfenctl.values import VISIBLE_STRING
 
@@ -2022,25 +2232,16 @@ def post_preset(ctx: Context, req: Request) -> Response:
 def _preset_entries(
     charger: AlfenCharger, ctx: Context, entries: list[dict[str, Any]], job: Job
 ) -> None:
-    """Write a preset's property entries, reporting progress per batch."""
-    from alfenctl import properties as properties_mod
-    from alfenctl.values import coerce_input, values_equal
+    """Write a preset's property entries, reporting progress per batch.
 
-    queries = [str(e["id"]) for e in entries]
-    props, _errors = properties_mod.resolve(charger, ctx.catalog, queries)
-    by_id = {p.id_str: p for p in props}
-    writes: dict[tuple[int, int], tuple[Any, int | None]] = {}
-    for entry in entries:
-        prop = by_id.get(str(entry["id"]))
-        if prop is None or not prop.writable:
-            continue
-        try:
-            value = coerce_input(prop, entry["value"])
-        except ValueError:
-            continue
-        if values_equal(prop, value):
-            continue
-        writes[prop.key] = (value, prop.data_type)
+    ``force`` because a preset is not a charger's own settings file: it comes
+    from the operator's own server and carries back-office addresses, not the
+    serial and MAC that make :func:`plan_import` hold a settings file back.
+    """
+    from alfenctl import properties
+
+    plan = properties.plan_import(charger, ctx.catalog, entries, force=True)
+    writes = plan.writes
     if writes:
         charger.write_properties(writes)
     job.report(
@@ -2054,16 +2255,7 @@ def _preset_entries(
 # --- routing table -----------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class Route:
-    """One endpoint: what runs it, and whether it changes anything."""
-
-    handler: Callable[[Context, Request], Response]
-    write: bool = False
-    raw_body: bool = False  # takes an uploaded file rather than JSON
-
-
-ROUTES: dict[tuple[str, str], Route] = {
+ROUTES: dict[tuple[str, str], Route[Context]] = {
     ("GET", "/api/state"): Route(get_state),
     ("GET", "/api/stations"): Route(get_stations),
     ("GET", "/api/dashboard"): Route(get_dashboard),
@@ -2072,8 +2264,6 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "/api/properties"): Route(get_properties),
     ("GET", "/api/logs"): Route(get_logs),
     ("GET", "/api/jobs"): Route(get_jobs),
-    ("GET", "/api/clients"): Route(get_clients),
-    ("POST", "/api/focus"): Route(post_focus),
     ("GET", "/api/firmware/available"): Route(get_firmware_available),
     ("POST", "/api/station"): Route(post_station, write=True),
     ("POST", "/api/link"): Route(post_link),
@@ -2089,7 +2279,7 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "/api/tags"): Route(post_tags, write=True),
     ("GET", "/api/master-tag"): Route(get_master_tag),
     ("POST", "/api/master-tag"): Route(post_master_tag, write=True),
-    ("GET", "/api/network"): Route(get_network),
+    ("GET", "/api/connectivity"): Route(get_connectivity),
     ("GET", "/api/wifi/scan"): Route(get_wifi_scan),
     ("POST", "/api/wifi"): Route(post_wifi, write=True),
     ("GET", "/api/meter-test"): Route(get_meter_test),
@@ -2109,6 +2299,8 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "/api/tilt"): Route(post_tilt, write=True),
     ("GET", "/api/console"): Route(get_console_commands),
     ("POST", "/api/console"): Route(post_console, write=True),
+    ("POST", "/api/diag"): Route(post_diagnostic, write=True),
+    ("GET", "/api/diag"): Route(get_diagnostic_result),
     ("POST", "/api/erase"): Route(post_erase, write=True),
     ("GET", "/api/backup"): Route(get_backup),
     ("POST", "/api/restore"): Route(post_restore, write=True, raw_body=True),
@@ -2117,13 +2309,10 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "/api/actions/reboot"): Route(post_reboot, write=True),
     ("POST", "/api/actions/time-sync"): Route(post_time_sync, write=True),
     ("POST", "/api/actions/license"): Route(post_license, write=True),
+    ("POST", "/api/cloud"): Route(post_cloud),
+    ("POST", "/api/cloud/login"): Route(post_cloud_login),
     ("POST", "/api/actions/controls"): Route(post_controls, write=True),
     ("POST", "/api/actions/firmware-release"): Route(post_firmware_release, write=True),
     ("POST", "/api/actions/logo"): Route(post_logo, write=True, raw_body=True),
     ("POST", "/api/actions/firmware"): Route(post_firmware, write=True, raw_body=True),
 }
-
-
-def parse_query(raw: str) -> dict[str, str]:
-    """Flatten a query string to the last value of each parameter."""
-    return {k: v[-1] for k, v in parse_qs(raw, keep_blank_values=True).items()}

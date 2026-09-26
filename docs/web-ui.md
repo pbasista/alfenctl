@@ -1,18 +1,44 @@
 # The web interface
 
-`alfenctl ui` serves a small dashboard on this machine. This page is
+`alfenctl` with no arguments serves a small dashboard on this machine and
+opens a browser on it -- the web interface is this program's default mode of
+operation, and `alfenctl ui` spelled out is the same command. This page is
 what it shows and why it is shaped the way it is; see the
 [README](../README.md) for the rest of the tool.
 
 ```console
-$ alfenctl ui --station garage
+$ alfenctl --station garage
 alfenctl ui is serving on http://127.0.0.1:8088/
   press Ctrl+C to stop
 ```
 
-A browser opens on a dashboard of the station: each socket it really has,
+Every option of the `ui` command can be given straight after the bare name,
+because that is where they are handed: `alfenctl --listen 0.0.0.0:8088
+--read-only` is `alfenctl ui --listen 0.0.0.0:8088 --read-only`.
+
+A browser opens on the **Fleet**: every charging station this machine can
+see, one tile each -- the ones your config file names, the ones mDNS answered
+for, and the one this page is already on. Clicking one is how the page
+changes station, and it opens that station's dashboard on the way -- a tile
+is not a setting, and somebody who clicked one has said which charger they
+want to look at, so leaving them on a grid with one tile newly outlined
+makes them go and find the tab themselves. It is what clicking a board on
+jkctl's Bank does. A station the server will not take leaves the page where
+it is, beside the list another can be chosen from. **Add by address**
+reaches a charger that neither announces itself nor is in the file. The same
+list is behind the station's name in the header -- click the name to switch
+without leaving the tab you are on. There
+used to be a *change* button beside it, which is a second control for an
+action about the thing right next to it; the name is what you read to realise
+you are looking at the wrong charger, so the name is what opens the list.
+
+The **Dashboard** is the station itself: each socket it really has,
 with its own state and its own maximum current, the live meter with what it
-is drawing now and the half hour of it this page has watched, the
+is drawing now and the half hour of it this page has watched -- with the
+station's inside temperature on the same chart, in its own colour and on its
+own scale, because a metal box that has been charging at eleven kilowatts
+for an hour is warmer than one that has not, and on its own that is a card
+holding a line that moves a degree an hour -- the
 temperature against the alarm band it has to stay inside beside the
 display's brightness and the on-screen price it shows a session costing,
 load balancing with the mode and the two currents that decide it, the
@@ -32,15 +58,18 @@ charging sessions from the charger's own transaction database, totalled by
 month, by socket or by tag. **Logs** holds the event log, following it live
 or paged back as far as the charger's buffer goes. **Access** holds the
 authorization settings, the RFID whitelist, the master tag, and the
-passwords and the Eve Connect PIN. **Network** holds the interface
+passwords and the Eve Connect PIN. **Connectivity** holds the interface
 addresses, the Wi-Fi scan and join, the smart-meter wiring test, and the
-custom Modbus register map. **Backoffice** holds the OCPP connection and
+custom Modbus register map -- it is not called Network because on a page
+about charging stations that word means the charging network an operator
+runs them on, which is the tab after it. `alfenctl connectivity` on the
+command line is the same read. **Backoffice** holds the OCPP connection and
 the write-only secrets, and says which of the two ways to point a station
 at a CSMS is which -- the URLs here by hand, or an operator's preset from
 the Properties tab. **Properties** holds the property browser and
 editor, backup and restore with a diff preview, and the presets Alfen
 publishes. **Actions** holds the restart, clock sync, logo upload and
-firmware upgrade, tilt calibration, the console, and erase.
+firmware upgrade, tilt calibration, the console, diagnostics, and erase.
 
 Which tab you are on is in the address bar, so a reload comes back where
 you were and a link to `#logs` on this charger is a link somebody can send.
@@ -56,6 +85,24 @@ Taking the reply at face value put a phantom socket on the dashboard and
 raised "the sockets add up past the station maximum" against a station with
 one socket at half its limit, so `sysNrOfSockets` decides instead, in the CLI
 as well as the browser.
+
+### Diagnostics
+
+The **Diagnostics** card in Actions provides both CLI diagnostic operations.
+Enter a firmware-specific command name and a sequence ID from 0 to 255.
+Use **Add parameter** for each ordered string parameter; each field preserves
+spaces and empty values without shell quoting. **Send diagnostic** opens a
+confirmation showing the command, sequence ID, and parameters. Diagnostic
+operations may change charger state and remain subject to station
+authorization.
+
+**Read diagnostic result** retrieves the current response once and displays
+its JSON without changing field names or values. Match the command and
+sequence ID and inspect the finished flag: the response may describe an
+earlier request or an operation still in progress. Submission does not
+trigger result polling. **View last result** reopens the last fetched
+response without contacting the station. Read-only mode permits result
+retrieval but disables submission, with writes also rejected server-side.
 
 ### One column of tiles
 
@@ -136,12 +183,36 @@ the dashboard was showing a power factor as kilowatts.
 reading and its two limits are together rather than a row in the meter and
 two properties nobody can find. The reading is the card's headline, the band
 is drawn under it with a mark where the charger currently sits, and the two
-ends are sliders: `sensTemperatureAlarmLow` and `sensTemperatureAlarmHigh`
-(`2202_0`/`2203_0`) are `rw`, and the app sets them in its *Alerts* panel.
-They are written with **Apply** like every other card, and dragging one end
-into the other pushes it along rather than crossing it -- so a limit nobody
-touched can still be part of the write, exactly as a socket the station
-limit pushed down is.
+limits are dots on that band: `sensTemperatureAlarmLow` and
+`sensTemperatureAlarmHigh` (`2202_0`/`2203_0`) are `rw`, and the app sets
+them in its *Alerts* panel.
+
+The reading and both limits are written above the strip, each with the mark it
+has on the strip beside it, so the card answers "what is it, and what is it
+allowed to be" without a pointer on it -- which is the only way it answers on
+a phone, or in a screenshot pasted into a message. On a station reading
+exactly what one of its alarms is set to, the two are written once in a box
+carrying a mark for each of them.
+
+**The dots can be dragged.** Hovering the band gives an instant label naming
+whichever of the three it is nearest, and while a limit is being dragged the
+label is about that limit and says what it was. The sliders in the rows below
+are still there and are still how an exact number is set; both edit the same
+draft, so a limit moved on the picture moves the slider under it and turns
+the same colour, and the card's one **Apply** sends either. Dragging one
+slider end into the other pushes it along rather than crossing it -- so a
+limit nobody touched can still be part of the write, exactly as a socket the
+station limit pushed down is.
+
+A dragged dot keeps the keyboard afterwards: the arrow keys walk it a degree
+at a time, Page Up and Page Down ten, and the label says so while it holds
+them. The sliders in the rows have always answered the keyboard the same way,
+because they are the browser's own.
+
+The picture is `Band` from `devicectl`, shared with the battery tool, which
+draws the same shape for a cell's four protection voltages. It had been
+twenty lines of this program's own stylesheet that could draw exactly two
+limits and nothing else.
 
 They share a card with the display, and did not always: a reading and two
 sliders is a card and a half of content, and in a grid where every card is
@@ -180,6 +251,41 @@ The device-unique id is only shown when the charger reports one worth
 showing: it is what a vendor derives a key from, and a real NG910 answers
 with zeros, which is a row that says nothing. It is still in the property
 browser at `21A0_0` either way.
+
+The card's **Manufacturer** button opens a lookup against Alfen's own
+servers. **Sign in with Alfen** sends the tab to Alfen's own login page —
+you enter your username and password *there*, on Alfen's page, never in
+alfenctl. When you have, Alfen redirects the browser straight back to this
+page and the sign-in finishes on its own: the server trades the returned
+code for a token and caches it (the same 0600 cache `alfenctl cloud login`
+writes, holding tokens only, never a password), and the card shows you are
+signed in — with a **Sign out** button beside it that forgets the cached
+token, so a different Alfen account can sign in. **Look up** then needs
+nothing pasted and shows everything Alfen holds for this station: the
+account and company, the warranty, how many changes Alfen has logged for the
+station and when it last did, and the license key on file. **Show factory
+defaults** expands the manufacturer's whole property profile — every
+property value Alfen keeps for the station, each named the way the property
+browser names it. When the registered key differs from the one the charger
+carries, an **Install this key** button writes it (the same write as
+*Install a key* above, refused when the server runs `--read-only`).
+
+The automatic return works because Alfen's client also registers a
+`http://localhost:5000/` redirect, and Azure AD B2C applies the loopback
+exception to it — any port is accepted as long as the host is exactly
+`localhost` — so a UI served from `http://localhost:<port>` can use its own
+address as the redirect and read the code back with nothing pasted. The panel
+says which case it is in before you start: reach the UI by a LAN address or
+`127.0.0.1` rather than `localhost`, and that no longer matches, so it warns
+that the automatic return will not work and the sign-in falls back to opening
+Alfen in a new tab, whose page hands off to the mobile app and will not load
+— you copy its full address from the browser and paste it into the field the
+card then shows. *Use an access token instead* reveals a field for a bearer
+token (from `alfenctl cloud login`, or a script) as a further fallback. The
+CLI signs in the same way, through a one-shot local server, with `alfenctl
+cloud login` (and `alfenctl cloud logout` to forget it); `alfenctl cloud
+info` (add `--defaults` for the full property profile) and `alfenctl cloud
+license --install` then read and install.
 
 ### Knowing when the charger is busy
 
@@ -296,9 +402,12 @@ gesture, so it is allowed to do the raising the page itself may not.
 It stays off until pressed, deliberately: a page that asks for notification
 permission unbidden is how a site gets them refused for good. The answer is
 remembered per browser, next to the theme, and the bell turns them off
-again. Notifications also need a secure context -- this machine, or https
--- so the bell is not there at all on a page shared over plain http to
-someone else.
+again. Notifications also need a secure context -- this machine, or https --
+so on a page shared over plain http to someone else the browser will not take
+the question at all. The bell is still there, struck through, and says so
+when pressed; it used to simply not be drawn, which left the same header
+carrying one control on the machine serving it and another across the room,
+with nothing anywhere to say why.
 
 ### Sharing it
 
@@ -359,7 +468,7 @@ guessed name on a register that reconfigures a charger is worse than no
 name at all, so the row carries a "purpose unknown" badge in place of a
 name, the tooltip says what that means (not in the vendor's catalog, its
 apps, or this program), the count above the table says how many rows are
-in that state, and the "described only" checkbox hides them when you are
+in that state, and the "described only" switch hides them when you are
 looking for something else. The CLI marks the same rows with a `?` in the
 TITLE column, and both JSON shapes carry the same fact as `known: false`.
 
@@ -376,7 +485,7 @@ The tab is also where it was left. It used to rebuild itself on every visit
 -- a fresh read of the category list, a hold of the one connection, and the
 rows you had just read gone -- so what survives a tab switch (the
 categories, the loaded rows, the category, the filter and the two
-checkboxes) lives in the page's own state and is cleared when the station
+switches) lives in the page's own state and is cleared when the station
 changes. The category list is read once per charger, and the select is wide
 enough for a name before the list arrives, which is what used to move every
 control beside it a second after the tab opened. The select also holds
@@ -403,14 +512,23 @@ price is a display setting rather than a tariff -- nothing on the charger
 bills anybody -- so it lives under what the screen shows. The
 temperature joins it, for the reason above. The clock lives in
 *Station*: a clock nobody set is part of who the station is, and the
-drift badge beside the uptime says so. The temperature and display card
+drift badge beside the uptime says so. The two rows are **Local time**,
+written `2026-09-26 08:03:46` with the charger's zone on hover, and **Clock
+difference**, which says how far that clock is from the one on the computer
+running `alfenctl` with a direction -- `12 seconds ahead`, `2.5 years
+behind`, `in sync` -- and without "this computer", because the page is often
+read on a different one. **Sync clock**, the card's only action, is in its
+title. jkctl's Identity card draws the same two rows and the same button
+from the same code. The temperature and display card
 comes third, ahead of load balancing: between the two, it is the one
 more likely to be what somebody came to change.
 
 *Health* is the doctor's one-pass check. It is not run on load -- a full
-pass reads every panel and takes seconds -- but one click answers "is
-this charger okay" with the same findings the terminal prints, each with
-the area it came from. It used to be a loose button above the grid, which
+pass reads every panel and takes seconds -- but one click on **Run check**,
+in the card's title, answers "is this charger okay" with the same findings
+the terminal prints, each with the area it came from; after that the button
+reads **Check again**. jkctl's Health card has the same button, in the same
+place. It used to be a loose button above the grid, which
 made it the one thing on the page that was not a card and looked it.
 
 #### The line under the number
@@ -488,6 +606,40 @@ Apply sends what changed, Discard drops it -- and anything destructive (a
 profile clear, a whitelist clear, a rebooting SCN join, an erase) asks
 first, with the reason in the dialog.
 
+A field holding an edit nobody has applied is marked where it is: the
+control takes the colour every unsent edit wears, the field's name goes the
+same colour, and its card gets an edge in that colour and a count in its
+title -- *2 not sent*. Every card here carries its own Apply, and it is
+beside the count: a tick that applies the card's edits and a cross that
+discards them, each named in its tooltip. They used to be a bar at the foot
+of the card that appeared with the first edit, which made the card taller
+and moved every card below it; nothing hung on a card's title makes the
+title taller, and while a card holds edits a title too long for its line is
+cut short rather than wrapped, so the page does not move when a field
+changes.
+
+Every edit is also counted in the header, whichever tab it was made on:
+**Discard** and **Apply** there drop or send all of them, card by card, the
+way each card's own tick would. Edits are kept for the station, so a tab
+switched away from still has them when it is switched back to; choosing
+another station drops them. A write that fails keeps its edits to be tried
+again.
+
+The Properties tab edits the same way. **Edit** on a row opens its editor
+under it, and what is typed there is an edit like any other -- counted on
+the *Properties* card and in the header, sent by either -- where each row
+used to have a Save of its own.
+
+A few cards still write the moment they are used, because what they do is a
+single action with its own button rather than a setting to edit: the master
+tag, the passwords, the RFID whitelist, the secrets, the custom meter map,
+the charging profiles and the Smart Charging Network. Each says *applied
+immediately* in its title.
+
+A field's name explains the field on hover, where it has something to
+explain; a number's value gives its allowed range. A failure notice stays until it is dismissed rather than fading after
+twelve seconds.
+
 #### Sessions, added up
 
 The charger's transaction database is paged in whole -- there is no way to
@@ -551,19 +703,29 @@ The page is [Preact] with [htm], vendored as a single 13 KB ES module, so
 there is **no build step and no Node toolchain**: the files that ship in the
 wheel are the files you edit. Dark on true black, with Alfen's blue for
 identity and amber for anything live or in motion. What a build step would
-have caught is caught by [Biome] and `tools/frontlint.py` instead (see
+have caught is caught by [Biome] and `devicectl.devtools.frontlint` instead (see
 [CONTRIBUTING.md](../CONTRIBUTING.md)).
+
+Everything that is not about a charging station -- the header and its two
+rows, the tab strip, the cards and rows and buttons and tables the tabs are
+built from, the link pill, the dialogs, the toasts -- is `devicectl`'s, and
+jkctl, the same author's tool for JK battery management systems, draws the
+identical page from the identical code. The two are meant to differ in their
+content and in one hue, and in nothing else: same type, same spacing, same
+controls in the same places. If you use both, neither should have to be
+learned twice. What is in this program's own stylesheet is the palette and
+the panels that are genuinely about a charger.
 
 Which theme you get is the system's answer, not ours: the button in the
 header cycles **system → light → dark**, and on *system* the page follows
 `prefers-color-scheme` and re-follows it when the machine changes its mind
 at dusk. Only an explicit choice is remembered, and it is remembered per
-browser. The stylesheet declares `color-scheme` with each palette, so the
-half of the page the *browser* paints -- a checkbox's tick, a number
-input's spinners, a select's arrow and popup, a scrollbar -- follows the
+browser. The shared stylesheet declares `color-scheme` beside the theme the page
+stamps, so the half of the page the *browser* paints -- a number input's
+spinners, a select's arrow and popup, a scrollbar -- follows the
 same choice: `<meta name="color-scheme">` cannot, since it names the
 schemes a page supports and lets the machine pick between them, which is
-how a laptop set to dark used to put black checkboxes on a light page.
+how a laptop set to dark used to put black widgets on a light page.
 
 The resolution happens in JavaScript rather than in a media query
 because the stylesheet is dark on `:root` and light behind

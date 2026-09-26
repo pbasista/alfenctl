@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from fnmatch import fnmatch
+from functools import lru_cache
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -181,8 +182,16 @@ def _parse_type(raw: str | None) -> int | None:
         return None
 
 
+@lru_cache(maxsize=None)
 def load_catalog(path: Path | None = None) -> PropertyCatalog:
-    """Parse the EDS file (default: the copy bundled with the package)."""
+    """Parse the EDS file (default: the copy bundled with the package).
+
+    Cached, because the file is 206 KB of XML that never changes while the
+    process runs, and it is asked for once per command and once per web
+    request that touches a property.  A :class:`PropertyCatalog` is built
+    once and then only read -- its accessors hand back copies -- so the one
+    instance is safe to share between the request threads and the worker.
+    """
     if path is None:
         path = Path(__file__).with_name(EDS_FILENAME)
     root = ElementTree.parse(path).getroot()
